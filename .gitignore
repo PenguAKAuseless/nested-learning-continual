@@ -1,0 +1,24 @@
+# Virtual environment (I used 2, one for WSL one for Windows)
+.venv/ 
+.clvenv/
+
+# Python cache
+__pycache__/
+
+# Kaggle API credentials
+kaggle_credentials.json
+.kaggle/
+kaggle.json
+
+# Downloaded datasets
+data/cifar100/
+data/imagenet-256/
+*.zip
+*.tar.gz
+
+# Model checkpoints
+*.pth
+
+# Logs
+logs/
+*.log
