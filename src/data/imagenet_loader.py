@@ -235,8 +235,15 @@ def create_imagenet_256_tasks(data_path, num_tasks=10, classes_per_task=100,
     Each task corresponds to a different set of classes.
     Saves splits to disk to avoid loading all data into memory at once.
     
+    Directory structure created:
+        {data_path}/splits/task_0/train/  - Task 0 training data
+        {data_path}/splits/task_0/test/   - Task 0 test data
+        {data_path}/splits/task_1/train/  - Task 1 training data
+        ...
+        {data_path}/splits/split_info.pkl - Split configuration metadata
+    
     Parameters:
-    - data_path: str, path to the ImageNet dataset directory
+    - data_path: str, path to the ImageNet dataset directory (e.g., './data/imagenet-256')
     - num_tasks: int, number of tasks to split the dataset into
     - classes_per_task: int, number of classes per task
     - train_split: float, ratio of data to use for training (rest for testing)
@@ -245,9 +252,10 @@ def create_imagenet_256_tasks(data_path, num_tasks=10, classes_per_task=100,
     Returns:
     - tuple: (train_task_datasets, test_task_datasets) - lists of datasets for each task
     """
-    # Create splits directory
+    # Create splits directory inside the dataset directory for consistency
+    # This keeps all related data together (e.g., ./data/imagenet-256/splits/)
     data_path = Path(data_path)
-    splits_dir = data_path.parent / 'ImageNet' / 'splits'
+    splits_dir = data_path / 'splits'
     splits_dir.mkdir(parents=True, exist_ok=True)
     
     # Check if splits already exist

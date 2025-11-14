@@ -87,6 +87,7 @@ nested-learning-continual/
 ├── src/                                 # Source code
 │   ├── models/                          # Neural network architectures
 │   │   ├── nested_learning_network.py   # Nested Learning implementation
+│   │   ├── nl_network.py                # Alternative NL implementation
 │   │   ├── nested_network.py            # Legacy baseline (for comparison)
 │   │   └── base_model.py                # Abstract base classes
 │   ├── data/                            # Data loading and streaming
@@ -101,32 +102,35 @@ nested-learning-continual/
 │   │   └── trainer.py                   # Legacy trainer (baseline)
 │   ├── evaluation/                      # Metrics and analysis
 │   │   └── metrics.py                   # Accuracy, forgetting, etc.
-│   ├── utils/                           # Utilities
-│   │   ├── config.py                    # YAML configuration loader
-│   │   ├── logger.py                    # Logging utilities
-│   │   └── visualize_metrics.py         # Plotting and visualization
-│   └── main.py                          # Entry point
+│   └── utils/                           # Utilities
+│       ├── config.py                    # YAML configuration loader
+│       ├── logger.py                    # Logging utilities
+│       └── visualize_metrics.py         # Plotting and visualization
+├── setup/                               # Setup and configuration scripts
+│   ├── setup_imagenet.py                # Kaggle credentials setup
+│   └── __init__.py                      # Package initialization
 ├── configs/                             # Configuration files
 │   ├── split_imagenet.yaml              # CIFAR-100 config (recommended)
 │   ├── imagenet_256.yaml                # ImageNet-256 config
 │   └── default.yaml                     # Default parameters
-├── tests/                               # Unit and integration tests
-│   ├── test_models.py                   # Model architecture tests
-│   ├── test_data_stream.py              # Data pipeline tests
-│   └── test_realistic_streaming.py      # Streaming scenario tests
+├── tests/                               # Unit and integration tests (in development)
+│   └── __init__.py
 ├── notebooks/                           # Jupyter notebooks
 │   └── analysis.ipynb                   # Results visualization
-├── data/                                # Datasets (auto-created)
+├── data/                                # Datasets (auto-created, gitignored)
 │   ├── cifar100/                        # CIFAR-100 (auto-download)
+│   │   └── CIFAR100/
+│   │       └── splits/                  # Task splits (generated)
 │   └── imagenet-256/                    # ImageNet-256 (Kaggle)
-├── models/                              # Saved model checkpoints
+│       └── splits/                      # Task splits (generated)
+├── models/                              # Saved checkpoints (gitignored)
 │   └── best_model.pth
-├── docs/                                # Documentation
-│   ├── NESTED_LEARNING_IMPLEMENTATION.md  # NL architecture details
-│   ├── PIPELINE_DESCRIPTION.md            # Data streaming details
-│   ├── OPTIMIZATION_REPORT.md             # Performance optimizations
-│   └── README_IMAGENET.md                 # ImageNet setup guide
-└── requirements.txt                     # Python dependencies
+├── logs/                                # Training logs (gitignored)
+├── kaggle_credentials.json              # Kaggle API keys (gitignored)
+├── kaggle_credentials.json.example      # Template for credentials
+├── requirements.txt                     # Python dependencies
+├── setup.py                             # Package setup
+└── README.md                            # This file
 ```
 
 ## 🚀 Installation
@@ -160,17 +164,6 @@ nested-learning-continual/
 3. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
-   ```
-
-4. **Verify installation**:
-   ```bash
-   python verify_nested_learning.py
-   ```
-   
-   Expected output:
-   ```
-   ✅ SUCCESS: All update frequencies are correct!
-   Nested Learning is working as expected.
    ```
 
 ### GPU Setup (Optional but Recommended)
@@ -236,7 +229,7 @@ For large-scale experiments (requires Kaggle API):
 
 1. **Setup Kaggle credentials** (one-time):
    ```bash
-   python setup_imagenet.py
+   python setup/setup_imagenet.py
    # Follow prompts to enter your Kaggle username and API key
    ```
 
@@ -244,8 +237,6 @@ For large-scale experiments (requires Kaggle API):
    ```bash
    python src/main.py --config configs/imagenet_256.yaml
    ```
-
-See [README_IMAGENET.md](README_IMAGENET.md) for detailed instructions.
 
 ### Baseline Comparison
 
@@ -442,7 +433,10 @@ With production optimizations enabled:
 - Non-blocking GPU Transfers
 - Efficient Memory Management
 
-See [OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md) for technical details.
+For more details on optimizations, see the code comments in:
+- `src/models/nested_learning_network.py` (model optimizations)
+- `src/data/stream_loader.py` (data pipeline)
+- `src/training/continual_learner.py` (training loop)
 
 ### Hardware Requirements
 
@@ -461,48 +455,34 @@ See [OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md) for technical details.
 pytest tests/ -v
 ```
 
-### Test Individual Components
-
-```bash
-# Test model architecture
-pytest tests/test_models.py -v
-
-# Test data streaming pipeline
-pytest tests/test_data_stream.py -v
-
-# Test realistic streaming scenarios
-pytest tests/test_realistic_streaming.py -v
-```
-
-### Verify Nested Learning
-
-```bash
-# Quick verification that multi-frequency updates work correctly
-python verify_nested_learning.py
-```
-
-Expected output:
-```
-Testing Nested Learning update frequencies...
-✅ Level 0 (freq=1): 100 updates / 100 steps = 1.0000 (expected: 1.0000)
-✅ Level 1 (freq=10): 10 updates / 100 steps = 0.1000 (expected: 0.1000)
-✅ Level 2 (freq=100): 1 updates / 100 steps = 0.0100 (expected: 0.0100)
-
-✅ SUCCESS: All update frequencies are correct!
-Nested Learning is working as expected.
-```
+**Note**: Test files are currently in development. The tests directory contains the structure for future test implementations.
 
 ## 📚 Documentation
 
-### Core Documentation
+### Code Documentation
 
-- **[NESTED_LEARNING_IMPLEMENTATION.md](NESTED_LEARNING_IMPLEMENTATION.md)**: Detailed architecture guide
-  - Multi-frequency parameter updates
-  - Continuum Memory System (CMS)
-  - Temporal isolation mechanism
-  
-- **[PIPELINE_DESCRIPTION.md](PIPELINE_DESCRIPTION.md)**: Data streaming pipeline
+The codebase is documented inline with detailed docstrings. Key files to explore:
+
+- **`src/models/nested_learning_network.py`**: Multi-frequency architecture implementation
+  - Continuum Memory System (CMS) blocks
+  - Parameter grouping by update frequency
+  - Residual connections and normalization
+
+- **`src/training/nested_optimizer.py`**: Custom optimizer with frequency-based updates
+  - Frequency scheduling logic
+  - Gradient accumulation for slow layers
+  - Step counter management
+
+- **`src/data/stream_loader.py`**: Realistic continual learning data pipeline
   - Single-pass streaming
+  - Blurry task boundaries
+  - OOD noise injection
+
+- **`src/training/continual_learner.py`**: Main training loop
+  - Task-incremental learning
+  - Experience replay integration
+  - Evaluation on old tasks
+
 ## 🔧 Troubleshooting
 
 ### Common Issues
@@ -543,7 +523,7 @@ pip install --upgrade torch torchvision
 # Extract to: ./data/cifar100/
 
 # ImageNet-256: Check Kaggle credentials
-python setup_imagenet.py
+python setup/setup_imagenet.py
 ```
 
 ### Performance Tips
@@ -624,31 +604,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 [⭐ Star this repo](https://github.com/yourusername/nested-learning-continual) • [🐛 Report Bug](https://github.com/yourusername/nested-learning-continual/issues) • [💡 Request Feature](https://github.com/yourusername/nested-learning-continual/issues)
 
 </div>
-
-### Performance Documentation
-
-- **[OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md)**: Technical optimization details
-  - Mixed precision training
-  - Gradient checkpointing
-  - Memory management
-  
-- **[OPTIMIZATION_SUMMARY.md](OPTIMIZATION_SUMMARY.md)**: Visual performance guide
-  - Benchmark results
-  - Hardware recommendations
-  
-- **[OPTIMIZATION_CHECKLIST.md](OPTIMIZATION_CHECKLIST.md)**: Verification guide
-  - Performance validation
-  - Troubleshooting
-
-### Quick References
-
-- **[OPTIMIZATION_QUICK_REFERENCE.md](OPTIMIZATION_QUICK_REFERENCE.md)**: TL;DR optimization guide
-- **[NL_INTEGRATION_SUMMARY.md](NL_INTEGRATION_SUMMARY.md)**: Nested Learning quick summary
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
