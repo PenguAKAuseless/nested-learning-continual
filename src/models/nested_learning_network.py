@@ -52,7 +52,7 @@ class ContinuumMemoryBlock(nn.Module):
         if use_conv:
             self.memory_net = nn.Sequential(
                 nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2),
-                nn.LayerNorm([channels, 1, 1]),  # Will broadcast
+                nn.BatchNorm2d(channels),  # BatchNorm for conv layers
                 nn.GELU(),
                 nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2)
             )
@@ -222,7 +222,7 @@ class NestedLearningNetwork(nn.Module):
         # This updates at highest frequency (every step)
         self.stem = nn.Sequential(
             nn.Conv2d(input_channels, base_channels, 7, stride=2, padding=3),
-            nn.LayerNorm([base_channels, 1, 1]),  # LayerNorm instead of BatchNorm for stability
+            nn.BatchNorm2d(base_channels),  # BatchNorm for conv layers
             nn.GELU(),
             nn.MaxPool2d(3, stride=2, padding=1)
         )

@@ -147,7 +147,7 @@ class ContinualLearner:
         
         # GPU optimization: use automatic mixed precision for faster training
         use_amp = self.use_cuda and torch.cuda.is_available()
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
         
         pbar = tqdm(stream_loader, desc=f'{task_name} {self.current_task}')
         for batch_data in pbar:
@@ -181,7 +181,7 @@ class ContinualLearner:
             self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
             
             # Mixed precision training for speed
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 outputs = self.model(valid_images)
                 loss = self.criterion(outputs, valid_labels)
             
