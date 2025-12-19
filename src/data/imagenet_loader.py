@@ -284,7 +284,7 @@ def create_imagenet_256_tasks(data_path, num_tasks=10, classes_per_task=100,
     
     # Load full dataset WITHOUT transform (we'll save raw images)
     print(f"\nLoading ImageNet dataset from: {data_path}")
-    full_dataset = ImageFolder(root=str(data_path), transform=None)
+    full_dataset = ImageFolder(root=str(data_path / 'train'), transform=None)
     total_classes = len(full_dataset.classes)
     total_samples = len(full_dataset)
     

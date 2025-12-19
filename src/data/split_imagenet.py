@@ -315,7 +315,8 @@ def create_split_imagenet_tasks(data_dir, num_tasks=10, classes_per_task=10, use
         total_classes = 100
     else:
         # Load ImageNet from directory
-        full_dataset = ImageFolder(root=data_dir, transform=transform)
+        train_dir = os.path.join(data_dir, 'train') # FIX: Auto point to subfolder `train` in `/data/imagenet-256`
+        full_dataset = ImageFolder(root=train_dir, transform=transform)
         total_classes = len(full_dataset.classes)
     
     # Validate and adjust task configuration

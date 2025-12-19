@@ -88,7 +88,7 @@ class ContinuumMemoryBlock(nn.Module):
         identity = x
         out = self.memory_net(x)
         # In-place operation to save memory
-        return identity.add_(self.residual_scale * out)
+        return identity + (self.residual_scale * out) # FIX: In-place ERROR with Checkpoint -> `.add_` -> `+`
     
     def should_update(self, global_step: int) -> bool:
         """Check if this block should update at current global step"""

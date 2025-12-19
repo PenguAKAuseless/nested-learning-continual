@@ -2,13 +2,13 @@
 model:
   input_channels: 3
   num_classes: 1000  # ImageNet has 1000 classes
-  base_channels: 64
+  base_channels: 2
 
 data:
   dataset_name: "ImageNet256"
   data_dir: "./data/imagenet-256"  # Will be downloaded via kagglehub
-  batch_size: 32  # Reduced for larger images
-  num_workers: 4
+  batch_size: 8  # Reduced for larger images
+  num_workers: 32
   shuffle: true
   image_size: [224, 224]  # Input size after transforms
   
@@ -21,10 +21,13 @@ training:
   num_epochs: 1  # Single pass through data (streaming)
   learning_rate: 0.0001  # Lower LR for larger dataset
   weight_decay: 0.0001
-  optimizer: "Adam"
+  optimizer: "NestedOptimizer"
+
+  use_amp: true        # True: Save 50% VRAM
+  gradient_clip: 1.0
   
 continual_learning:
-  memory_size: 5000  # Larger buffer for ImageNet
+  memory_size: 500  # Larger buffer for ImageNet
   strategy: "realistic_streaming"
   blur_ratio: 0.1  # 10% future task data injection
   other_task_ratio: 0.05  # 5% past task data injection (realistic interference)
@@ -32,7 +35,7 @@ continual_learning:
   
 stream:
   enabled: true
-  batch_size: 32
+  batch_size: 8
   shuffle: true
   mix_old_tasks: true
 

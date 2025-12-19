@@ -162,6 +162,7 @@ class NestedOptimizer(Optimizer):
             # Accumulate gradient
             state['grad_acc'].add_(p.grad)
     
+    @torch.no_grad() # FIX: Missing guard
     def _update_parameters(self, group: Dict[str, Any]):
         """
         Update parameters using accumulated gradients (Adam-style).

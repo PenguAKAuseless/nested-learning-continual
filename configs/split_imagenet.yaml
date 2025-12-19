@@ -9,7 +9,7 @@ model:
 data:
   dataset_name: "CIFAR100"  # Using CIFAR100 as demo dataset
   data_dir: "./data/cifar100"  # Auto-download location
-  batch_size: 128  # OPTIMIZED: Increased from 64 for better GPU utilization
+  batch_size: 64  # OPTIMIZED: Increased from 64 for better GPU utilization
   num_workers: 4  # OPTIMIZED: Parallel data loading
   shuffle: true
   image_size: [32, 32]  # CIFAR100 image size
@@ -38,7 +38,7 @@ continual_learning:
   
 stream:
   enabled: true
-  batch_size: 128  # OPTIMIZED: Match training batch size
+  batch_size: 64  # OPTIMIZED: Match training batch size
   shuffle: true
   mix_old_tasks: true  # Enable mixing with old tasks (except task 0)
 
