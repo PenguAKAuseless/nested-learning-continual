@@ -1,33 +1,48 @@
-# Virtual environment (I used 2, one for WSL one for Windows)
-.venv/ 
-.clvenv/
+# Virtual environment
+venv/
+env/
+ENV/
 
 # Python cache
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# Kaggle API credentials (never commit API keys!)
-kaggle_credentials.json
-.kaggle/
-kaggle.json
-setup/kaggle_credentials.json
-
-# Development notes (optional - remove this line if you want to track NOTES.md)
-# NOTES.md
-
-# Downloaded datasets
-data/cifar100/
-data/imagenet-256/
-data/CIFAR100/
-data/ImageNet/
-*.zip
+# Dataset directories
+data/
+datasets/
 *.tar.gz
+*.zip
 
-# Processed dataset splits (generated from raw data)
-data/*/splits/
-
-# Model checkpoints
-*.pth
-
-# Logs
+# Model checkpoints and results
+checkpoints/
+results/
 logs/
-*.log
+*.pth
+*.pt
+*.ckpt
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Secrets
+kaggle.json

@@ -1,1 +1,4 @@
-# This file is intentionally left blank.
+"""
+Test package for continual learning framework.
+Run tests with: python -m pytest tests/
+"""
