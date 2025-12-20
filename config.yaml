@@ -1,45 +1,38 @@
-# ==========================================
-# Cấu hình thực nghiệm: Offline CL Baseline
-# Dataset: ImageNet-256
-# Strategy: Joint Training (Cumulative)
-# ==========================================
-
 experiment:
   name: "offline_joint_training_resnet18"
-  seed: 42                  # Cố định seed để đảm bảo tính tái lập (reproducibility)
-  device: "cuda"            # "cuda" hoặc "cpu"
-  save_dir: "./checkpoints" # Thư mục lưu model weights và logs
-
+  seed: 42              
+  device: "cuda"
+  save_dir: "./checkpoints" 
 data:
-  root_dir: "./datasets/imagenet256"  # Đường dẫn đến thư mục dữ liệu gốc
+  root_dir: "./data/imagenet256"
   dataset_name: "ImageNet-256"
-  num_tasks: 5              # Chia 256 lớp thành 5 tasks (stream)
-  total_classes: 256        # Tổng số lớp của toàn bộ dataset
-  input_size: 224           # Kích thước ảnh đầu vào (ResNet standard)
-  num_workers: 4            # Số luồng CPU load dữ liệu
-  pin_memory: True          # Tối ưu hóa chuyển dữ liệu lên GPU
+  num_tasks: 5
+  total_classes: 256
+  input_size: 224
+  num_workers: 4
+  pin_memory: True
 
 model:
   architecture: "resnet18"
-  pretrained: False         # False: Train from scratch (đúng chuẩn CL benchmark)
-  num_classes: 256          # Output layer size khớp với total_classes
+  pretrained: False
+  num_classes: 256
 
 training:
-  strategy: "offline"       # offline = joint training (cumulative data)
-  batch_size: 64            # Batch size cho training
-  epochs_per_task: 50       # Số epoch train cho mỗi giai đoạn (task)
+  strategy: "offline"
+  batch_size: 64
+  epochs_per_task: 50
   
   optimizer:
     name: "sgd"
-    lr: 0.01                # Learning rate khởi tạo
+    lr: 0.01
     momentum: 0.9
-    weight_decay: 0.0005    # Giảm thiểu overfitting
+    weight_decay: 0.0005
 
   scheduler:
     type: "step_lr"
-    step_size: 30           # Giảm LR sau mỗi 30 epochs
-    gamma: 0.1              # Hệ số giảm (LR * 0.1)
+    step_size: 30
+    gamma: 0.1
 
 logging:
-  use_wandb: False          # Bật nếu muốn dùng Weights & Biases để vẽ biểu đồ
-  print_freq: 10            # Tần suất in log ra màn hình (số batches)
+  use_wandb: False
+  print_freq: 10
