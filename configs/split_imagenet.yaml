@@ -1,0 +1,57 @@
+# Split ImageNet Configuration for Continual Learning with Nested Learning
+model:
+  input_channels: 3
+  num_classes: 100  # Total classes (CIFAR100)
+  base_channels: 64
+  use_nested_learning: true  # Use Nested Learning architecture (set to false for legacy CNN)
+  num_cms_levels: 3  # Number of CMS levels (3 = fast/medium/slow)
+
+data:
+  dataset_name: "CIFAR100"  # Using CIFAR100 as demo dataset
+  data_dir: "./data/cifar100"  # Auto-download location
+  batch_size: 128  # OPTIMIZED: Increased from 64 for better GPU utilization
+  num_workers: 4  # OPTIMIZED: Parallel data loading
+  shuffle: true
+  image_size: [32, 32]  # CIFAR100 image size
+  pin_memory: true  # OPTIMIZED: Faster GPU transfer
+  prefetch_factor: 2  # OPTIMIZED: Prefetch batches for smoother training
+  
+  # Split ImageNet/CIFAR100 task configuration
+  num_tasks: 10
+  classes_per_task: 10
+
+training:
+  num_epochs: 1  # Single pass through data (set to 1, actual streaming happens once)
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "NestedOptimizer"  # Use NestedOptimizer (or "Adam" for legacy)
+  log_optimizer_stats_freq: 100  # Log optimizer stats every N steps
+  use_amp: true  # OPTIMIZED: Automatic Mixed Precision for faster training
+  gradient_clip: 1.0  # OPTIMIZED: Gradient clipping for stability
+  
+continual_learning:
+  memory_size: 2000  # Size of experience replay buffer
+  strategy: "realistic_streaming"  # Single-pass with blurry boundaries and OOD noise
+  blur_ratio: 0.1  # 10% future task data injection (blurry boundary)
+  other_task_ratio: 0.05  # 5% past task data injection (realistic interference)
+  ood_ratio: 0.05  # 5% OOD noise injection (synthetic noise)
+  
+stream:
+  enabled: true
+  batch_size: 128  # OPTIMIZED: Match training batch size
+  shuffle: true
+  mix_old_tasks: true  # Enable mixing with old tasks (except task 0)
+
+logging:
+  log_dir: "./logs"
+  log_interval: 10
+  save_checkpoints: true
+
+evaluation:
+  metrics:
+    - "accuracy"
+    - "old_task_accuracy"
+    - "forgetting"
+  evaluate_old_tasks: true  # Evaluate on old tasks after each task
+  save_best_model: true
+  model_save_path: "./models/best_model.pth"

@@ -1,0 +1,33 @@
+# Virtual environment (I used 2, one for WSL one for Windows)
+.venv/ 
+.clvenv/
+
+# Python cache
+__pycache__/
+
+# Kaggle API credentials (never commit API keys!)
+kaggle_credentials.json
+.kaggle/
+kaggle.json
+setup/kaggle_credentials.json
+
+# Development notes (optional - remove this line if you want to track NOTES.md)
+# NOTES.md
+
+# Downloaded datasets
+data/cifar100/
+data/imagenet-256/
+data/CIFAR100/
+data/ImageNet/
+*.zip
+*.tar.gz
+
+# Processed dataset splits (generated from raw data)
+data/*/splits/
+
+# Model checkpoints
+*.pth
+
+# Logs
+logs/
+*.log
