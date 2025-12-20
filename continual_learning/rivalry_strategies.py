@@ -30,6 +30,32 @@ class RivalryStrategy(ABC):
         """Perform one training step"""
         pass
     
+    def train_step_amp(self, x: torch.Tensor, y: torch.Tensor, optimizer: torch.optim.Optimizer, 
+                       scaler: torch.cuda.amp.GradScaler) -> float:
+        """Perform one training step with automatic mixed precision"""
+        self.model.train()
+        optimizer.zero_grad()
+        
+        # Forward pass with autocast
+        with torch.cuda.amp.autocast():
+            output = self.model(x)
+            loss = F.cross_entropy(output, y)
+            
+            # Add strategy-specific loss components
+            loss = self._compute_loss_components(x, y, output, loss)
+        
+        # Backward pass with gradient scaling
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        
+        return loss.item()
+    
+    def _compute_loss_components(self, x: torch.Tensor, y: torch.Tensor, 
+                                 output: torch.Tensor, base_loss: torch.Tensor) -> torch.Tensor:
+        """Override in subclasses to add strategy-specific loss terms (called within autocast)"""
+        return base_loss
+    
     @abstractmethod
     def after_task(self, dataloader: torch.utils.data.DataLoader):
         """Called after completing a task"""
@@ -76,6 +102,23 @@ class EWCStrategy(RivalryStrategy):
         
         return loss.item()
     
+    def _compute_loss_components(self, x: torch.Tensor, y: torch.Tensor, 
+                                 output: torch.Tensor, base_loss: torch.Tensor) -> torch.Tensor:
+        """Add EWC penalty to base loss (called within autocast)"""
+        loss = base_loss
+        
+        if self.task_id > 0:
+            ewc_loss = 0.0
+            for name, param in self.model.named_parameters():
+                if name in self.fisher_dict:
+                    fisher = self.fisher_dict[name]
+                    optpar = self.optpar_dict[name]
+                    ewc_loss += (fisher * (param - optpar) ** 2).sum()
+            
+            loss = loss + self.lambda_ewc * ewc_loss
+        
+        return loss
+    
     def after_task(self, dataloader: torch.utils.data.DataLoader):
         """Compute Fisher information matrix"""
         self.model.eval()
@@ -86,7 +129,11 @@ class EWCStrategy(RivalryStrategy):
             fisher_dict[name] = torch.zeros_like(param.data)
         
         # Sample from dataloader
-        num_samples = min(self.fisher_sample_size, len(dataloader.dataset))
+        try:
+            dataset_size = len(dataloader.dataset)  # type: ignore
+        except (TypeError, AttributeError):
+            dataset_size = self.fisher_sample_size
+        num_samples = min(self.fisher_sample_size, dataset_size)
         sample_count = 0
         
         for x, y in dataloader:
@@ -227,7 +274,11 @@ class GEMStrategy(RivalryStrategy):
         """Store exemplars in memory"""
         # Simple random sampling
         dataset = dataloader.dataset
-        indices = torch.randperm(len(dataset))[:self.memory_size]
+        try:
+            dataset_size = len(dataset)  # type: ignore
+        except (TypeError, AttributeError):
+            dataset_size = self.memory_size
+        indices = torch.randperm(dataset_size)[:self.memory_size]
         
         for idx in indices:
             x, y = dataset[idx]
@@ -255,7 +306,7 @@ class PackNetStrategy(RivalryStrategy):
         # Apply masks to gradients
         if self.task_id > 0:
             for name, param in self.model.named_parameters():
-                if name in self.masks:
+                if name in self.masks and param.grad is not None:
                     param.grad.data *= self.masks[name]
         
         optimizer.step()

@@ -30,8 +30,24 @@ pip install -e .
 # Or install from requirements.txt
 pip install -r requirements.txt
 
-# For GPU support, install PyTorch with CUDA
+# For GPU support, install PyTorch with CUDA (REQUIRED for GPU usage)
+# Check your CUDA version first: nvidia-smi
+# For CUDA 12.1 (most compatible):
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# For CUDA 11.8:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Note: Installing torch without specifying the index-url will install CPU-only version
+```
+
+**Important**: If you get `"Torch not compiled with CUDA enabled"` error:
+```bash
+# Uninstall CPU version
+pip uninstall torch torchvision -y
+
+# Reinstall with CUDA support
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
 ## Command-Line Arguments
@@ -74,9 +90,10 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 - `--weight_decay`: Weight decay (default: 0.0001)
 
 ### System Configuration
-- `--device`: Device (`cuda` or `cpu`)
+- `--device`: Device (`cuda:0` or `cpu`)
 - `--seed`: Random seed (default: 42)
 - `--num_workers`: Data loading workers (default: 4)
+- `--amp`: Enable automatic mixed precision training (reserved for future implementation)
 
 ### Experiment Configuration
 - `--save_dir`: Results directory (default: `results`)
@@ -250,6 +267,29 @@ pip install -r requirements.txt
 
 # Or install package in development mode
 pip install -e .
+```
+
+**Error**: `AssertionError: Torch not compiled with CUDA enabled`
+
+This means PyTorch was installed without CUDA support (CPU-only version).
+
+**Solution**:
+```bash
+# Check your GPU and CUDA version
+nvidia-smi
+
+# Uninstall CPU-only PyTorch
+pip uninstall torch torchvision torchaudio -y
+
+# Reinstall with CUDA support (use the appropriate CUDA version)
+# For CUDA 12.1:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# For CUDA 11.8:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Verify installation
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ```
 
 ### 4. Convergence Issues

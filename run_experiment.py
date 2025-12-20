@@ -13,7 +13,7 @@ import torch.nn as nn
 from pathlib import Path
 import sys
 
-from vision_transformer_nested_learning import ViTNestedLearning, ViTNestedConfig
+from model.vision_transformer_nested_learning import ViTNestedLearning, ViTNestedConfig
 from continual_learning.rivalry_strategies import (
     NaiveStrategy, EWCStrategy, LwFStrategy, GEMStrategy, 
     PackNetStrategy, SynapticIntelligence
@@ -154,12 +154,14 @@ def main():
                         help='Weight decay')
     
     # System arguments
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
-                        help='Device (cuda/cpu)')
+    parser.add_argument('--device', type=str, default='cuda:0' if torch.cuda.is_available() else 'cpu',
+                        help='Device (cuda:0/cpu)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
+    parser.add_argument('--amp', action='store_true',
+                        help='Enable automatic mixed precision training (faster on modern GPUs)')
     
     # Experiment arguments
     parser.add_argument('--save_dir', type=str, default='results',
@@ -208,14 +210,15 @@ def main():
         print("Creating task loaders...")
         task_loaders = []
         for task_id in range(args.num_tasks):
-            train_dataset, test_dataset = dataset.get_task(task_id)
+            train_dataset = dataset.get_task(task_id, train=True)
+            test_dataset = dataset.get_task(task_id, train=False)
             
             train_loader = torch.utils.data.DataLoader(
                 train_dataset,
                 batch_size=args.batch_size,
                 shuffle=True,
                 num_workers=args.num_workers,
-                pin_memory=True if args.device == 'cuda' else False,
+                pin_memory=True if 'cuda' in args.device else False,
             )
             
             test_loader = torch.utils.data.DataLoader(
@@ -223,7 +226,7 @@ def main():
                 batch_size=args.batch_size * 2,
                 shuffle=False,
                 num_workers=args.num_workers,
-                pin_memory=True if args.device == 'cuda' else False,
+                pin_memory=True if 'cuda' in args.device else False,
             )
             
             task_loaders.append((train_loader, test_loader))
@@ -233,6 +236,16 @@ def main():
         # Create model
         print(f"Creating {args.model_size} model...")
         model = get_model(args.model_size, num_classes, img_size)
+        
+        # Move model to device immediately
+        device = torch.device(args.device)
+        model = model.to(device)
+        
+        # Enable GPU optimizations if using CUDA
+        if device.type == 'cuda':
+            torch.backends.cudnn.benchmark = True  # Auto-tune for best performance
+            torch.backends.cudnn.deterministic = False  # Allows non-deterministic ops for speed
+            print(f"GPU optimizations enabled on {device}")
         
         # Count parameters
         total_params = sum(p.numel() for p in model.parameters())
@@ -267,6 +280,7 @@ def main():
             experiment_name=args.experiment_name,
             log_interval=args.log_interval,
             save_checkpoints=not args.no_checkpoints,
+            use_amp=args.amp,
         )
         
         # Create runner and run experiment

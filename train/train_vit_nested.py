@@ -8,16 +8,19 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from vision_transformer_nested_learning import (
-    create_vit_nested_tiny,
-    create_vit_nested_small,
-    create_vit_nested_base,
+import sys
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from model.vision_transformer_nested_learning import (
+    ViTNestedLearning,
     ViTNestedConfig
 )
 import argparse
 from tqdm import tqdm
 import json
-from pathlib import Path
 
 
 def get_dataloaders(data_path: str, batch_size: int = 32, img_size: int = 224):

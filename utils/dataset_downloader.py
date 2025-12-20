@@ -48,18 +48,6 @@ class DatasetDownloader:
             'kaggle_dataset': 'dimensi0n/imagenet-256',
             'size': '~37 GB (compressed)',
             'extract_to': 'imagenet'
-        },
-        'imagenet': {
-            'name': 'ImageNet (Full)',
-            'auto_download': False,  # requires manual download due to licensing
-            'torchvision': False,
-            'size': '~150 GB',
-            'instructions': [
-                '1. Register at https://image-net.org/download.php',
-                '2. Download ILSVRC2012 training and validation sets',
-                '3. Extract to data/imagenet/ with train/ and val/ subdirectories',
-                '4. Run this script with --verify to check integrity'
-            ]
         }
     }
     
@@ -292,6 +280,10 @@ class DatasetDownloader:
                 dataset_path = self.data_root / 'MNIST'
             else:
                 dataset_path = self.data_root / dataset_name
+        elif config.get('kaggle'):
+            # For Kaggle datasets, use extract_to path
+            extract_to = config.get('extract_to', dataset_name)
+            dataset_path = self.data_root / extract_to
         else:
             dataset_path = self.data_root / dataset_name
         
@@ -365,12 +357,28 @@ class DatasetDownloader:
         train_path = imagenet_path / 'train'
         val_path = imagenet_path / 'val'
         
+        # Check if we need to split the dataset
+        if not train_path.exists() or not val_path.exists():
+            print("⚠️  ImageNet needs to be split into train/val sets")
+            print("   Checking for raw class directories...")
+            
+            # Count class directories in root
+            class_dirs = [d for d in imagenet_path.iterdir() if d.is_dir() and d.name not in ['train', 'val', '__pycache__']]
+            if len(class_dirs) == 1000:
+                print(f"   Found {len(class_dirs)} class directories")
+                print("   Splitting into train (80%) and val (20%)...")
+                self._split_imagenet_trainval(imagenet_path)
+                print("   ✅ Split complete")
+            else:
+                return False, f"Expected 1000 class directories, found {len(class_dirs)}"
+        
+        # Verify the split structure
         issues = []
         
         if not train_path.exists():
             issues.append("Missing train/ directory")
         else:
-            train_classes = list(train_path.iterdir())
+            train_classes = [d for d in train_path.iterdir() if d.is_dir()]
             print(f"   Train classes found: {len(train_classes)}")
             if len(train_classes) != 1000:
                 issues.append(f"Expected 1000 train classes, found {len(train_classes)}")
@@ -378,7 +386,7 @@ class DatasetDownloader:
         if not val_path.exists():
             issues.append("Missing val/ directory")
         else:
-            val_classes = list(val_path.iterdir())
+            val_classes = [d for d in val_path.iterdir() if d.is_dir()]
             print(f"   Val classes found: {len(val_classes)}")
             if len(val_classes) != 1000:
                 issues.append(f"Expected 1000 val classes, found {len(val_classes)}")
@@ -388,6 +396,57 @@ class DatasetDownloader:
         
         print(f"✅ ImageNet structure verified")
         return True, "ImageNet verified successfully"
+    
+    def _split_imagenet_trainval(self, imagenet_path: Path, train_ratio: float = 0.8):
+        """Split ImageNet class directories into train and val sets."""
+        import random
+        from tqdm import tqdm
+        
+        train_path = imagenet_path / 'train'
+        val_path = imagenet_path / 'val'
+        
+        train_path.mkdir(exist_ok=True)
+        val_path.mkdir(exist_ok=True)
+        
+        # Get all class directories
+        class_dirs = sorted([d for d in imagenet_path.iterdir() 
+                           if d.is_dir() and d.name not in ['train', 'val', '__pycache__']])
+        
+        print(f"   Splitting {len(class_dirs)} classes...")
+        
+        for class_dir in tqdm(class_dirs, desc="Processing classes"):
+            class_name = class_dir.name
+            
+            # Create class directories in train and val
+            train_class_dir = train_path / class_name
+            val_class_dir = val_path / class_name
+            train_class_dir.mkdir(exist_ok=True)
+            val_class_dir.mkdir(exist_ok=True)
+            
+            # Get all images in this class
+            images = sorted([f for f in class_dir.iterdir() if f.is_file()])
+            
+            # Shuffle and split
+            random.seed(42)  # For reproducibility
+            random.shuffle(images)
+            split_idx = int(len(images) * train_ratio)
+            
+            train_images = images[:split_idx]
+            val_images = images[split_idx:]
+            
+            # Move images to train
+            for img in train_images:
+                shutil.move(str(img), str(train_class_dir / img.name))
+            
+            # Move images to val
+            for img in val_images:
+                shutil.move(str(img), str(val_class_dir / img.name))
+            
+            # Remove the original class directory if empty
+            if not any(class_dir.iterdir()):
+                class_dir.rmdir()
+        
+        print(f"   Completed: {len(class_dirs)} classes split into train/val")
     
     def download_all(self, force: bool = False) -> Dict[str, bool]:
         """

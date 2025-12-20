@@ -5,11 +5,15 @@ Run various tests to verify the implementation
 
 import torch
 import torch.nn as nn
-from vision_transformer_nested_learning import (
+import sys
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from model.vision_transformer_nested_learning import (
     ViTNestedLearning,
     ViTNestedConfig,
-    create_vit_nested_tiny,
-    create_vit_nested_small,
 )
 import time
 

@@ -46,6 +46,9 @@ class ViTNestedConfig:
     use_cls_token: bool = True
     dropout: float = 0.1
     drop_path: float = 0.1
+    
+    # Data loading settings
+    num_workers: int = 32
 
 
 class PatchEmbedding(nn.Module):

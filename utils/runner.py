@@ -54,7 +54,7 @@ class RunConfig:
     
     # Strategy settings
     strategy_type: str = "naive"  # naive, ewc, lwf, gem, packnet, si
-    strategy_params: Dict[str, Any] = None
+    strategy_params: Optional[Dict[str, Any]] = None
     
     # Data settings
     dataset_name: str = "split_cifar10"
@@ -71,6 +71,7 @@ class RunConfig:
     log_interval: int = 50
     save_checkpoints: bool = True
     evaluate_every_epoch: bool = False  # If True, evaluate on all tasks every epoch
+    use_amp: bool = False  # Automatic mixed precision training (faster on modern GPUs)
     
     def __post_init__(self):
         if self.strategy_params is None:
@@ -86,6 +87,12 @@ class ExperimentRunner:
     def __init__(self, config: RunConfig):
         self.config = config
         self.device = torch.device(config.device)
+        
+        # Mixed precision training
+        self.use_amp = config.use_amp and self.device.type == 'cuda'
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        if self.use_amp:
+            logger.info("Mixed precision training enabled (AMP)")
         
         # Setup directories
         self.save_dir = Path(config.save_dir) / config.experiment_name
@@ -157,6 +164,11 @@ class ExperimentRunner:
             num_tasks = len(task_loaders)
             accuracy_matrix = np.zeros((num_tasks, num_tasks))
             
+            # Initialize per-task history with NaN for all epochs
+            epochs_per_task = self.config.num_epochs
+            total_epochs = epochs_per_task * num_tasks
+            self.results['history'] = {t: [np.nan] * total_epochs for t in range(num_tasks)}
+            
             # Train on each task sequentially
             for task_id in range(num_tasks):
                 try:
@@ -172,7 +184,7 @@ class ExperimentRunner:
                     # Train on current task
                     task_start_time = time.time()
                     losses = self._train_task(
-                        model, strategy, train_loader, optimizer, task_id
+                        model, strategy, train_loader, optimizer, task_id, task_loaders
                     )
                     task_time = time.time() - task_start_time
                     
@@ -261,6 +273,7 @@ class ExperimentRunner:
         train_loader: DataLoader,
         optimizer: optim.Optimizer,
         task_id: int,
+        task_loaders: Optional[List[Tuple[DataLoader, DataLoader]]] = None,
     ) -> List[float]:
         """Train on a single task"""
         model.train()
@@ -281,8 +294,12 @@ class ExperimentRunner:
                     x = x.to(self.device, non_blocking=True)
                     y = y.to(self.device, non_blocking=True)
                     
-                    # Perform training step through strategy
-                    loss = strategy.train_step(x, y, optimizer)
+                    # Perform training step through strategy with mixed precision
+                    if self.use_amp:
+                        assert self.scaler is not None, "Scaler should not be None when AMP is enabled"
+                        loss = strategy.train_step_amp(x, y, optimizer, self.scaler)
+                    else:
+                        loss = strategy.train_step(x, y, optimizer)
                     
                     epoch_loss += loss
                     num_batches += 1
@@ -298,6 +315,19 @@ class ExperimentRunner:
             avg_epoch_loss = epoch_loss / max(num_batches, 1)
             epoch_losses.append(avg_epoch_loss)
             logger.info(f"Epoch {epoch + 1}/{self.config.num_epochs} - Loss: {avg_epoch_loss:.4f}")
+            
+            # Evaluate after each epoch if task_loaders provided
+            if task_loaders is not None:
+                global_epoch = task_id * self.config.num_epochs + epoch
+                task_accs = self._evaluate_all_tasks(model, task_loaders[:task_id + 1], task_id)
+                
+                # Update history for all evaluated tasks at current epoch
+                for eval_task_id, acc in enumerate(task_accs):
+                    self.results['history'][eval_task_id][global_epoch] = acc / 100.0
+                
+                # Log accuracies
+                acc_str = ', '.join([f'T{i+1}: {a:.1f}%' for i, a in enumerate(task_accs)])
+                logger.info(f"  Epoch {epoch + 1} accuracies: [{acc_str}]")
         
         return epoch_losses
     
@@ -309,33 +339,56 @@ class ExperimentRunner:
     ) -> List[float]:
         """Evaluate on all tasks seen so far"""
         model.eval()
+        
+        # Enable test-time memorization for nested learning models
+        # This allows TITAN/CMS memories to adapt during evaluation
+        use_memorization = hasattr(model, 'enable_memorization')
+        if use_memorization:
+            model.enable_memorization(True)
+            logger.info("Test-time memorization enabled for nested learning")
+        
         task_accuracies = []
         
-        with torch.no_grad():
-            for task_id, (_, test_loader) in enumerate(task_loaders):
-                correct = 0
-                total = 0
-                
-                for x, y in test_loader:
-                    try:
-                        x = x.to(self.device, non_blocking=True)
-                        y = y.to(self.device, non_blocking=True)
-                        
-                        outputs = model(x)
-                        _, predicted = outputs.max(1)
-                        
-                        total += y.size(0)
-                        correct += predicted.eq(y).sum().item()
-                        
-                    except Exception as e:
-                        logger.warning(f"Error evaluating batch: {e}")
-                        continue
-                
-                accuracy = 100.0 * correct / max(total, 1)
-                task_accuracies.append(accuracy)
-                
-                task_label = "Current" if task_id == current_task_id else f"Task {task_id + 1}"
-                logger.info(f"  {task_label} accuracy: {accuracy:.2f}%")
+        for task_id, (_, test_loader) in enumerate(task_loaders):
+            correct = 0
+            total = 0
+            
+            for x, y in test_loader:
+                try:
+                    x = x.to(self.device, non_blocking=True)
+                    y = y.to(self.device, non_blocking=True)
+                    
+                    # Forward pass
+                    if use_memorization:
+                        # Allow memory updates without gradient computation
+                        with torch.set_grad_enabled(False):
+                            outputs = model(x)
+                    else:
+                        # Standard no-grad evaluation
+                        with torch.no_grad():
+                            outputs = model(x)
+                    
+                    # Handle tuple returns
+                    if isinstance(outputs, tuple):
+                        outputs = outputs[1]
+                    
+                    _, predicted = outputs.max(1)
+                    total += y.size(0)
+                    correct += predicted.eq(y).sum().item()
+                    
+                except Exception as e:
+                    logger.warning(f"Error evaluating batch: {e}")
+                    continue
+            
+            accuracy = 100.0 * correct / max(total, 1)
+            task_accuracies.append(accuracy)
+            
+            task_label = "Current" if task_id == current_task_id else f"Task {task_id + 1}"
+            logger.info(f"  {task_label} accuracy: {accuracy:.2f}%")
+        
+        # Disable memorization after evaluation
+        if use_memorization:
+            model.enable_memorization(False)
         
         return task_accuracies
     

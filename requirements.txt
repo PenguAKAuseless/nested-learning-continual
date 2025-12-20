@@ -1,3 +1,7 @@
+# PyTorch and torchvision
+# NOTE: For GPU support with CUDA, install using:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Otherwise, this will install CPU-only version
 torch>=2.0.0
 torchvision>=0.15.0
 numpy>=1.21.0

@@ -22,14 +22,11 @@ A comprehensive framework for continual learning combining Vision Transformers w
 - [Citation](#citation)
 - [License](#license)
 
-## 📚 Complete Documentation
+## 📚 Documentation
 
-- **[USAGE_SUMMARY.md](docs/USAGE_SUMMARY.md)** - Complete usage guide with examples ⭐ **START HERE**
-- **[EXPERIMENT_GUIDE.md](docs/EXPERIMENT_GUIDE.md)** - Detailed experiment instructions
+- **[EXPERIMENT_GUIDE.md](docs/EXPERIMENT_GUIDE.md)** - Detailed experiment instructions ⭐ **START HERE**
 - **[ERROR_ANALYSIS.md](docs/ERROR_ANALYSIS.md)** - Comprehensive error handling guide
 - **[GUIDE.md](docs/GUIDE.md)** - In-depth usage and configuration guide
-- **[PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md)** - High-level project overview
-- **[STRUCTURE.md](docs/STRUCTURE.md)** - Project architecture visualization
 - **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** - Quick command reference
 
 ## ✨ Features
@@ -206,30 +203,48 @@ jupyter notebook notebooks/
 
 ```
 nested-learning-continual/
-├── vision_transformer_nested_learning.py  # Core ViT-Nested implementation
-├── train_vit_nested.py                   # Training script
-├── test_vit_nested.py                    # Test suite
+├── model/                                 # Core model implementation
+│   ├── __init__.py
+│   └── vision_transformer_nested_learning.py  # ViT-Nested architecture
+│
+├── train/                                 # Training scripts
+│   ├── __init__.py
+│   └── train_vit_nested.py               # Training script
 │
 ├── continual_learning/                    # CL algorithms
 │   ├── __init__.py
-│   ├── rivalry_strategies.py            # EWC, LwF, GEM, etc.
-│   └── metrics.py                        # Evaluation metrics
+│   ├── rivalry_strategies.py             # EWC, LwF, GEM, etc.
+│   └── metrics.py                         # Evaluation metrics
 │
 ├── data/                                  # Data loading
 │   ├── __init__.py
-│   ├── stream_loaders.py                # Online/offline loaders
-│   └── datasets.py                       # Benchmark datasets
+│   ├── stream_loaders.py                 # Online/offline loaders
+│   └── datasets.py                        # Benchmark datasets
 │
 ├── experiments/                           # Comparison framework
 │   ├── __init__.py
-│   ├── comparator.py                    # Method comparison
-│   ├── visualizer.py                    # Plotting tools
-│   └── logger.py                         # Experiment logging
+│   ├── comparator.py                     # Method comparison
+│   ├── visualizer.py                     # Plotting tools
+│   └── logger.py                          # Experiment logging
+│
+├── tests/                                 # Test suite
+│   ├── __init__.py
+│   ├── test_vit_nested.py
+│   ├── test_datasets.py
+│   ├── test_amp.py
+│   └── test_diagnostic.py
+│
+├── utils/                                 # Utilities
+│   ├── __init__.py
+│   ├── runner.py                          # Experiment runner
+│   ├── helpers.py                         # Helper functions
+│   └── dataset_downloader.py             # Dataset downloader
 │
 ├── notebooks/                             # Interactive demos
 │   ├── 01_quick_demo.ipynb
 │   └── 02_continual_learning_comparison.ipynb
 │
+├── run_experiment.py                      # Main experiment launcher
 ├── requirements.txt                       # Dependencies
 ├── setup.py                              # Package setup
 └── README.md                             # This file
@@ -240,16 +255,9 @@ nested-learning-continual/
 ### Model Configurations
 
 ```python
-from vision_transformer_nested_learning import (
-    create_vit_nested_tiny,    # ~5M params
-    create_vit_nested_small,   # ~22M params
-    create_vit_nested_base,    # ~86M params
-    create_vit_nested_large,   # ~307M params
-)
+from model.vision_transformer_nested_learning import ViTNestedConfig, ViTNestedLearning
 
 # Custom configuration
-from vision_transformer_nested_learning import ViTNestedConfig, ViTNestedLearning
-
 config = ViTNestedConfig(
     img_size=224,
     patch_size=16,
