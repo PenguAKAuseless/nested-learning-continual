@@ -2,15 +2,16 @@
 model:
   input_channels: 3
   num_classes: 1000  # ImageNet has 1000 classes
-  base_channels: 2
+  base_channels: 64
 
 data:
   dataset_name: "ImageNet256"
   data_dir: "./data/imagenet-256"  # Will be downloaded via kagglehub
-  batch_size: 8  # Reduced for larger images
-  num_workers: 32
+  batch_size: 32  # Reduced for larger images
+  num_workers: 4
   shuffle: true
   image_size: [224, 224]  # Input size after transforms
+  pin memory: true # Update: Window
   
   # ImageNet task configuration
   num_tasks: 10
