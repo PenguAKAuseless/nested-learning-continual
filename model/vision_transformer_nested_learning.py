@@ -87,6 +87,9 @@ class TITANMemory(nn.Module):
         self.register_buffer('memory', torch.zeros(mem_size, dim))
         self.register_buffer('step_counter', torch.tensor(0))
         
+        # Control flag for continual learning: freeze memories after task
+        self.enable_memory_updates = True
+        
         # Query/Key/Value projections
         self.to_q = nn.Linear(dim, dim, bias=False)
         self.to_k = nn.Linear(dim, dim, bias=False)
@@ -118,7 +121,7 @@ class TITANMemory(nn.Module):
         output = self.output_proj(retrieved)
         
         # Update memory if teach signal provided and period elapsed
-        if teach_signal is not None and self.training:
+        if teach_signal is not None and self.training and self.enable_memory_updates:
             self._update_memory(x, teach_signal)
         
         return output
@@ -129,11 +132,20 @@ class TITANMemory(nn.Module):
             # Average across batch and sequence
             update = (x.detach() + teach_signal.detach()).mean(dim=(0, 1))  # [dim]
             
-            # Write to memory slot (simple round-robin)
+            # Write to memory slot with high retention (0.99 momentum)
+            # This prevents catastrophic overwriting during new task training
             slot_idx = (self.step_counter // self.update_period) % self.mem_size
-            self.memory[slot_idx] = 0.9 * self.memory[slot_idx] + 0.1 * update
+            self.memory[slot_idx] = 0.99 * self.memory[slot_idx] + 0.01 * update
         
         self.step_counter += 1
+    
+    def freeze_memory(self):
+        """Freeze memory updates to prevent overwriting during continual learning"""
+        self.enable_memory_updates = False
+    
+    def unfreeze_memory(self):
+        """Unfreeze memory updates to allow learning"""
+        self.enable_memory_updates = True
 
 
 class CMSMemory(nn.Module):
@@ -181,7 +193,7 @@ class CMSMemory(nn.Module):
         attn_out, _ = self.attention(encoded, memory_expanded, memory_expanded)
         
         # Update memory
-        if teach_signal is not None and self.training:
+        if teach_signal is not None and self.training and self.enable_memory_updates:
             self._accumulate_and_update(x, teach_signal)
         
         return attn_out
@@ -198,13 +210,21 @@ class CMSMemory(nn.Module):
             # Aggregate chunks
             aggregated = self.chunk_buffer.mean(dim=0)  # [dim]
             
-            # Write to memory (round-robin)
+            # Write to memory with high retention (0.99 momentum)
             slot_idx = (self.step_counter // self.update_period) % self.mem_size
-            self.memory[slot_idx] = 0.95 * self.memory[slot_idx] + 0.05 * aggregated
+            self.memory[slot_idx] = 0.99 * self.memory[slot_idx] + 0.01 * aggregated
             
             # Reset buffer
             self.chunk_idx.zero_()
             self.step_counter += self.update_period
+    
+    def freeze_memory(self):
+        """Freeze memory updates to prevent overwriting during continual learning"""
+        self.enable_memory_updates = False
+    
+    def unfreeze_memory(self):
+        """Unfreeze memory updates to allow learning"""
+        self.enable_memory_updates = True
 
 
 class DeepMomentumOptimizer(nn.Module):
@@ -300,8 +320,16 @@ class HOPEBlock(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [B, num_heads, N, head_dim]
         
-        # Scaled dot-product attention
-        attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.config.dropout if self.training else 0.0)
+        # Scaled dot-product attention (with fallback for compatibility)
+        try:
+            attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.config.dropout if self.training else 0.0)
+        except Exception:
+            # Fallback to manual attention if SDPA fails (some CUDA versions)
+            attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            attn = F.softmax(attn, dim=-1)
+            if self.training and self.config.dropout > 0:
+                attn = F.dropout(attn, p=self.config.dropout)
+            attn_out = torch.matmul(attn, v)
         
         # Reshape and project
         attn_out = attn_out.transpose(1, 2).reshape(B, N, C)
@@ -438,6 +466,20 @@ class ViTNestedLearning(nn.Module):
         logits = self.head(x)
         
         return logits
+    
+    def freeze_memories(self):
+        """Freeze all memory updates across TITAN and CMS layers"""
+        for block in self.blocks:
+            block.titan.freeze_memory()
+            block.cms_fast.freeze_memory()
+            block.cms_slow.freeze_memory()
+    
+    def unfreeze_memories(self):
+        """Unfreeze all memory updates to allow learning"""
+        for block in self.blocks:
+            block.titan.unfreeze_memory()
+            block.cms_fast.unfreeze_memory()
+            block.cms_slow.unfreeze_memory()
     
     def enable_memorization(self, enable: bool = True):
         """Enable/disable test-time memorization"""

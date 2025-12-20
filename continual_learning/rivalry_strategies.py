@@ -396,13 +396,18 @@ class NaiveStrategy(RivalryStrategy):
     """Naive fine-tuning baseline (no continual learning)"""
     
     def train_step(self, x: torch.Tensor, y: torch.Tensor, optimizer: torch.optim.Optimizer) -> float:
-        """Standard training step"""
+        """Standard training step with gradient clipping"""
         self.model.train()
         optimizer.zero_grad()
         
         output = self.model(x)
         loss = F.cross_entropy(output, y)
         loss.backward()
+        
+        # Clip gradients for subsequent tasks to reduce catastrophic forgetting
+        if self.task_id > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
         optimizer.step()
         
         return loss.item()

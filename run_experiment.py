@@ -125,8 +125,8 @@ def main():
     parser.add_argument('--strategy', type=str, default='naive',
                         choices=['naive', 'ewc', 'lwf', 'gem', 'packnet', 'si'],
                         help='Continual learning strategy')
-    parser.add_argument('--lambda_ewc', type=float, default=5000.0,
-                        help='EWC lambda parameter')
+    parser.add_argument('--lambda_ewc', type=float, default=50000.0,
+                        help='EWC lambda parameter (default: 50000, higher = stronger regularization)')
     parser.add_argument('--lambda_lwf', type=float, default=1.0,
                         help='LwF lambda parameter')
     parser.add_argument('--memory_size', type=int, default=256,
@@ -158,8 +158,8 @@ def main():
                         help='Device (cuda:0/cpu)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
+    parser.add_argument('--num_workers', type=int, default=None,
+                        help='Number of data loading workers (default: auto - 0 on Windows, 4 on Linux/Mac)')
     parser.add_argument('--amp', action='store_true',
                         help='Enable automatic mixed precision training (faster on modern GPUs)')
     
@@ -175,12 +175,22 @@ def main():
     
     args = parser.parse_args()
     
+    # Auto-detect num_workers for Windows compatibility
+    if args.num_workers is None:
+        import platform
+        if platform.system() == 'Windows':
+            args.num_workers = 0  # Windows has issues with multiprocessing DataLoader
+            print("Note: Setting num_workers=0 for Windows compatibility")
+        else:
+            args.num_workers = 4  # Linux/Mac can use multiple workers
+    
     # Set seed
     set_seed(args.seed)
     
     # Auto-generate experiment name
     if args.experiment_name is None:
-        args.experiment_name = f"{args.method}_{args.strategy}_{args.dataset}_tasks{args.num_tasks}_seed{args.seed}"
+        # Will be updated after dataset loading to include single_class/group_class
+        args.experiment_name = None
     
     print(f"\n{'='*70}")
     print(f"Continual Learning Experiment")
@@ -198,13 +208,40 @@ def main():
         print("Loading dataset...")
         dataset = get_dataset(args.dataset, args.num_tasks, args.data_dir)
         
-        # Determine image size and number of classes
+        # Determine image size and classes per task
         if 'cifar' in args.dataset:
             img_size = 32
-            num_classes = 100 if 'cifar100' in args.dataset else 10
-        else:  # MNIST variants
+        elif 'mnist' in args.dataset:
             img_size = 28
-            num_classes = 10
+        else:
+            img_size = 224  # ImageNet default
+        
+        # Get classes_per_task from dataset (default 1)
+        classes_per_task = getattr(dataset, 'classes_per_task', 1)
+        # CRITICAL: Model needs outputs for ALL classes in the dataset, not just per-task
+        # Otherwise with classes_per_task=1, all labels get remapped to 0 (trivial problem)
+        if 'cifar10' in args.dataset.lower():
+            num_classes = 10  # CIFAR-10 has 10 total classes
+        elif 'cifar100' in args.dataset.lower():
+            num_classes = 100  # CIFAR-100 has 100 total classes
+        elif 'mnist' in args.dataset.lower():
+            num_classes = 10  # MNIST has 10 total classes
+        else:
+            # For custom datasets, use total classes if available
+            num_classes = getattr(dataset, 'num_classes', classes_per_task * args.num_tasks)
+        
+        # Determine class mode for experiment name
+        class_mode = 'single_class' if classes_per_task == 1 else f'group_class_{classes_per_task}'
+        
+        # Generate experiment name if not provided
+        if args.experiment_name is None:
+            args.experiment_name = f"{class_mode}_{args.model_size}_{args.strategy}_{args.dataset}_tasks{args.num_tasks}_seed{args.seed}"
+        
+        print(f"Dataset: {args.dataset}")
+        print(f"Number of tasks: {args.num_tasks}")
+        print(f"Classes per task: {classes_per_task} ({class_mode})")
+        print(f"Model output size: {num_classes}")
+        print(f"Experiment name: {args.experiment_name}")
         
         # Create task loaders
         print("Creating task loaders...")

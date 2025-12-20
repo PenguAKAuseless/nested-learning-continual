@@ -29,6 +29,7 @@ from continual_learning.metrics import (
     compute_backward_transfer,
     create_accuracy_matrix,
 )
+import math
 
 # Setup logging
 logging.basicConfig(
@@ -160,6 +161,7 @@ class ExperimentRunner:
                     lr=self.config.learning_rate,
                     weight_decay=self.config.weight_decay
                 )
+                self._initial_optimizer = optimizer
             
             num_tasks = len(task_loaders)
             accuracy_matrix = np.zeros((num_tasks, num_tasks))
@@ -177,6 +179,25 @@ class ExperimentRunner:
                     logger.info(f"{'='*50}")
                     
                     train_loader, test_loader = task_loaders[task_id]
+                    
+                    # Reduce learning rate for subsequent tasks to reduce forgetting
+                    if task_id > 0 and optimizer is not None:
+                        lr_scale = 0.3  # Use 30% of original LR for tasks 2+
+                        for param_group in optimizer.param_groups:
+                            if 'initial_lr' not in param_group:
+                                param_group['initial_lr'] = param_group['lr']
+                            param_group['lr'] = param_group['initial_lr'] * lr_scale
+                        logger.info(f"Reduced learning rate by {lr_scale}x for task {task_id + 1}")
+                    
+                    # Unfreeze memories for FIRST task only (Task 0)
+                    # For subsequent tasks, keep memories frozen to prevent overwriting
+                    if hasattr(model, 'unfreeze_memories') and self.config.strategy_type == 'naive':
+                        if task_id == 0:
+                            model.unfreeze_memories()
+                            logger.info(f"🔓 Unfroze memory buffers for Task {task_id + 1} training")
+                        else:
+                            # Keep frozen for all subsequent tasks
+                            logger.info(f"🔒 Keeping memory buffers FROZEN for Task {task_id + 1} (preserving Task 1 knowledge)")
                     
                     # Notify strategy of new task
                     strategy.before_task(task_id)
@@ -203,6 +224,12 @@ class ExperimentRunner:
                             'phase': 'after_task',
                             'error': str(e)
                         })
+                    
+                    # CRITICAL FIX: Freeze memories to prevent overwriting old task knowledge
+                    # This prevents catastrophic forgetting in continual learning
+                    if hasattr(model, 'freeze_memories') and self.config.strategy_type == 'naive':
+                        model.freeze_memories()
+                        logger.info(f"🔒 Froze memory buffers after Task {task_id + 1} to prevent overwriting")
                     
                     # Evaluate on all tasks seen so far
                     task_accs = self._evaluate_all_tasks(
@@ -301,6 +328,10 @@ class ExperimentRunner:
                     else:
                         loss = strategy.train_step(x, y, optimizer)
                     
+                    # Clip gradients to prevent catastrophic updates
+                    if task_id > 0:  # Only for tasks after the first
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    
                     epoch_loss += loss
                     num_batches += 1
                     
@@ -340,12 +371,10 @@ class ExperimentRunner:
         """Evaluate on all tasks seen so far"""
         model.eval()
         
-        # Enable test-time memorization for nested learning models
-        # This allows TITAN/CMS memories to adapt during evaluation
-        use_memorization = hasattr(model, 'enable_memorization')
-        if use_memorization:
-            model.enable_memorization(True)
-            logger.info("Test-time memorization enabled for nested learning")
+        # DO NOT enable test-time memorization during evaluation!
+        # This was causing catastrophic forgetting by overwriting memories
+        # during evaluation on later tasks
+        use_memorization = False
         
         task_accuracies = []
         
@@ -358,15 +387,9 @@ class ExperimentRunner:
                     x = x.to(self.device, non_blocking=True)
                     y = y.to(self.device, non_blocking=True)
                     
-                    # Forward pass
-                    if use_memorization:
-                        # Allow memory updates without gradient computation
-                        with torch.set_grad_enabled(False):
-                            outputs = model(x)
-                    else:
-                        # Standard no-grad evaluation
-                        with torch.no_grad():
-                            outputs = model(x)
+                    # Forward pass with no gradient and no memory updates
+                    with torch.no_grad():
+                        outputs = model(x)
                     
                     # Handle tuple returns
                     if isinstance(outputs, tuple):
@@ -385,10 +408,6 @@ class ExperimentRunner:
             
             task_label = "Current" if task_id == current_task_id else f"Task {task_id + 1}"
             logger.info(f"  {task_label} accuracy: {accuracy:.2f}%")
-        
-        # Disable memorization after evaluation
-        if use_memorization:
-            model.enable_memorization(False)
         
         return task_accuracies
     
@@ -473,6 +492,10 @@ class ExperimentRunner:
             # 3. Loss Curves
             self._plot_losses(suffix)
             
+            # 4. Epoch-by-Epoch Learning Curves
+            if 'history' in self.results:
+                self._plot_epoch_learning_curves(suffix)
+            
             logger.info(f"Plots saved to: {self.plot_dir}")
             
         except Exception as e:
@@ -505,22 +528,34 @@ class ExperimentRunner:
         if not self.results['task_accuracies']:
             return
         
-        task_accs = np.array(self.results['task_accuracies'])
-        num_evaluations, num_tasks = task_accs.shape
+        # Handle jagged arrays - task_accuracies is a list of lists with different lengths
+        task_accs_list = self.results['task_accuracies']
+        num_evaluations = len(task_accs_list)
         
         plt.figure(figsize=(12, 6))
         
-        for task_id in range(num_tasks):
-            # Get accuracies for this task across evaluations
-            accs = task_accs[task_id:, task_id]  # Only plot after task is learned
-            x = list(range(task_id, num_evaluations))
-            plt.plot(x, accs, marker='o', label=f'Task {task_id + 1}', linewidth=2)
+        # Collect all unique tasks that have been trained
+        max_tasks = max(len(accs) for accs in task_accs_list)
+        
+        for task_id in range(max_tasks):
+            x_vals = []
+            y_vals = []
+            
+            # Get accuracies for this task across evaluations (only after task appears)
+            for eval_idx in range(task_id, num_evaluations):
+                if task_id < len(task_accs_list[eval_idx]):
+                    x_vals.append(eval_idx)
+                    y_vals.append(task_accs_list[eval_idx][task_id])
+            
+            if x_vals:  # Only plot if we have data
+                plt.plot(x_vals, y_vals, marker='o', label=f'Task {task_id + 1}', linewidth=2, markersize=8)
         
         plt.xlabel('Training Progress (tasks completed)', fontsize=12)
         plt.ylabel('Test Accuracy (%)', fontsize=12)
         plt.title(f'{self.config.method_name} - Task Accuracy Evolution\n{self.config.strategy_type.upper()} Strategy', fontsize=14)
-        plt.legend(loc='best')
+        plt.legend(loc='best', fontsize=10)
         plt.grid(True, alpha=0.3)
+        plt.ylim(-5, 105)  # Set reasonable y-axis limits
         plt.tight_layout()
         plt.savefig(self.plot_dir / f"task_evolution_{suffix}.png", dpi=300)
         plt.close()
@@ -534,16 +569,69 @@ class ExperimentRunner:
         
         for task_id, task_losses in enumerate(self.results['losses']):
             epochs = list(range(1, len(task_losses) + 1))
-            plt.plot(epochs, task_losses, marker='o', label=f'Task {task_id + 1}', linewidth=2)
+            plt.plot(epochs, task_losses, marker='o', label=f'Task {task_id + 1}', linewidth=2, markersize=8)
         
         plt.xlabel('Epoch', fontsize=12)
         plt.ylabel('Loss', fontsize=12)
         plt.title(f'{self.config.method_name} - Training Loss per Task\n{self.config.strategy_type.upper()} Strategy', fontsize=14)
-        plt.legend(loc='best')
+        plt.legend(loc='best', fontsize=10)
         plt.grid(True, alpha=0.3)
         plt.yscale('log')
         plt.tight_layout()
         plt.savefig(self.plot_dir / f"losses_{suffix}.png", dpi=300)
+        plt.close()
+    
+    def _plot_epoch_learning_curves(self, suffix: str):
+        """Plot accuracy evolution epoch-by-epoch for all tasks"""
+        history = self.results.get('history', {})
+        if not history:
+            return
+        
+        fig, ax = plt.subplots(figsize=(14, 7))
+        
+        colors = plt.cm.tab10(np.linspace(0, 1, len(history)))
+        
+        for task_id, color in zip(sorted(history.keys()), colors):
+            task_history = history[task_id]
+            # Filter out NaN values and create corresponding epoch indices
+            valid_data = [(i, acc) for i, acc in enumerate(task_history) if not (isinstance(acc, float) and math.isnan(acc))]
+            
+            if valid_data:
+                epochs, accs = zip(*valid_data)
+                # Convert accuracies to percentages if they're in [0, 1] range
+                accs = [a * 100 if a <= 1.0 else a for a in accs]
+                
+                # Plot with markers
+                ax.plot(epochs, accs, marker='o', label=f'Task {int(task_id) + 1}', 
+                       linewidth=2.5, markersize=7, color=color, alpha=0.8)
+                
+                # Add start and end annotations
+                if len(epochs) > 1:
+                    ax.annotate(f'{accs[0]:.1f}%', xy=(epochs[0], accs[0]), 
+                               xytext=(5, 5), textcoords='offset points', fontsize=8, alpha=0.7)
+                    ax.annotate(f'{accs[-1]:.1f}%', xy=(epochs[-1], accs[-1]), 
+                               xytext=(5, -15), textcoords='offset points', fontsize=8, alpha=0.7)
+        
+        # Add vertical lines to mark task boundaries
+        num_tasks = len(history)
+        epochs_per_task = self.config.num_epochs
+        for task_boundary in range(1, num_tasks):
+            boundary_epoch = task_boundary * epochs_per_task
+            ax.axvline(x=boundary_epoch, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+            ax.text(boundary_epoch, ax.get_ylim()[1] * 0.95, f'Task {task_boundary + 1}', 
+                   ha='left', va='top', fontsize=9, alpha=0.6)
+        
+        ax.set_xlabel('Global Epoch (across all tasks)', fontsize=12)
+        ax.set_ylabel('Test Accuracy (%)', fontsize=12)
+        ax.set_title(f'{self.config.method_name} - Epoch-by-Epoch Learning Curves\n'
+                    f'{self.config.strategy_type.upper()} Strategy (Epochs per task: {epochs_per_task})', 
+                    fontsize=14, fontweight='bold')
+        ax.legend(loc='best', fontsize=10, framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle=':')
+        ax.set_ylim(-5, 105)
+        
+        plt.tight_layout()
+        plt.savefig(self.plot_dir / f"epoch_learning_curves_{suffix}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
 
