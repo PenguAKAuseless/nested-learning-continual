@@ -9,12 +9,103 @@ import torch
 import argparse
 import json
 import os
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
 from models import ViT_CMS, ViT_Simple, CNN_Replay
 from datasets import get_cifar10_task_loaders, get_dataset_info
 from training import Trainer, Evaluator
+
+
+def get_config_hash(config_dict):
+    """Generate hash from configuration for checkpoint identification."""
+    # Extract relevant config params that affect model training
+    relevant_params = {
+        'model': config_dict.get('model'),
+        'dataset': config_dict.get('dataset'),
+        'num_tasks': config_dict.get('num_tasks'),
+        'epochs': config_dict.get('epochs'),
+        'learning_rate': config_dict.get('learning_rate'),
+        'batch_size': config_dict.get('batch_size'),
+        'pretrained': config_dict.get('pretrained'),
+        'cms_levels': config_dict.get('cms_levels'),
+        'k': config_dict.get('k'),
+        'head_layers': config_dict.get('head_layers'),
+        'hidden_dim': config_dict.get('hidden_dim'),
+        'buffer_size': config_dict.get('buffer_size'),
+        'freeze_backbone': config_dict.get('freeze_backbone')
+    }
+    # Create hash from sorted params
+    config_str = json.dumps(relevant_params, sort_keys=True)
+    return hashlib.md5(config_str.encode()).hexdigest()[:8]
+
+
+def get_checkpoint_dir(args):
+    """Get checkpoint directory based on config hash."""
+    config_hash = get_config_hash(vars(args))
+    ckpt_dir = Path(args.checkpoint_dir) / f"{args.model}_{config_hash}"
+    return ckpt_dir
+
+
+def save_checkpoint(model, optimizer, task_id, results, ckpt_dir, args):
+    """Save model checkpoint after completing a task."""
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    
+    checkpoint = {
+        'task_id': task_id,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'results': results,
+        'config': vars(args)
+    }
+    
+    ckpt_path = ckpt_dir / f'checkpoint_task_{task_id}.pt'
+    torch.save(checkpoint, ckpt_path)
+    
+    # Also save config for easy inspection
+    config_path = ckpt_dir / 'config.json'
+    with open(config_path, 'w') as f:
+        json.dump(vars(args), f, indent=2)
+    
+    print(f"\n✓ Checkpoint saved: {ckpt_path}")
+    return ckpt_path
+
+
+def load_checkpoint(ckpt_dir, task_id=None):
+    """Load checkpoint for a specific task or latest checkpoint."""
+    if not ckpt_dir.exists():
+        return None
+    
+    # Find checkpoint to load
+    if task_id is not None:
+        ckpt_path = ckpt_dir / f'checkpoint_task_{task_id}.pt'
+        if not ckpt_path.exists():
+            return None
+    else:
+        # Find latest checkpoint
+        checkpoints = sorted(ckpt_dir.glob('checkpoint_task_*.pt'))
+        if not checkpoints:
+            return None
+        ckpt_path = checkpoints[-1]
+    
+    print(f"Loading checkpoint: {ckpt_path}")
+    checkpoint = torch.load(ckpt_path)
+    return checkpoint
+
+
+def check_existing_checkpoints(ckpt_dir, num_tasks):
+    """Check which tasks have been completed."""
+    if not ckpt_dir.exists():
+        return -1
+    
+    completed_tasks = []
+    for task_id in range(num_tasks):
+        ckpt_path = ckpt_dir / f'checkpoint_task_{task_id}.pt'
+        if ckpt_path.exists():
+            completed_tasks.append(task_id)
+    
+    return max(completed_tasks) if completed_tasks else -1
 
 
 def get_model(model_name, num_classes=2, device='cuda', **kwargs):
@@ -53,10 +144,13 @@ def get_model(model_name, num_classes=2, device='cuda', **kwargs):
             freeze_backbone=kwargs.get('freeze_backbone', False)
         )
     elif model_name == 'cnn_replay':
+        # CNN uses smaller image size (32x32) for efficiency
+        input_size = kwargs.get('input_size', 32)
         model = CNN_Replay(
             num_classes=num_classes,
             buffer_size=kwargs.get('buffer_size', 1000),
-            hidden_dim=kwargs.get('cnn_hidden_dim', 64)
+            hidden_dim=kwargs.get('cnn_hidden_dim', 64),
+            input_size=input_size
         )
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -88,13 +182,15 @@ def run_experiment(args):
     
     # Create dataloaders
     print(f"\nCreating dataloaders...")
+    # Use different image sizes for different models
+    image_size = 32 if args.model == 'cnn_replay' else 224
     train_loaders, test_loaders = get_cifar10_task_loaders(
         data_root=args.data_root,
         num_tasks=args.num_tasks,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         balance=True,
-        image_size=224  # ViT input size
+        image_size=image_size  # 32 for CNN, 224 for ViT
     )
     
     # Initialize model
@@ -106,7 +202,8 @@ def run_experiment(args):
         'head_layers': args.head_layers,
         'hidden_dim': args.hidden_dim,
         'buffer_size': args.buffer_size,
-        'cnn_hidden_dim': args.cnn_hidden_dim
+        'cnn_hidden_dim': args.cnn_hidden_dim,
+        'input_size': image_size  # Pass image size to CNN
     }
     model = get_model(args.model, num_classes=2, device=device, **model_kwargs)
     
@@ -125,21 +222,51 @@ def run_experiment(args):
     
     evaluator = Evaluator(model=model, device=device)
     
+    # Check for existing checkpoints
+    ckpt_dir = get_checkpoint_dir(args)
+    last_completed_task = check_existing_checkpoints(ckpt_dir, args.num_tasks)
+    
     # Track results
     results = {
         'config': vars(args),
         'dataset_info': dataset_info,
         'task_results': {},
         'baseline_accuracies': {},
+        'per_task_history': {},  # Track how each task performs over time
         'final_evaluation': {}
     }
     
+    # Load checkpoint if resuming
+    start_task = 0
+    if last_completed_task >= 0 and not args.no_checkpoint:
+        print(f"\n{'='*60}")
+        print(f"Found existing checkpoints up to task {last_completed_task}")
+        print(f"{'='*60}")
+        
+        if args.resume:
+            checkpoint = load_checkpoint(ckpt_dir, last_completed_task)
+            if checkpoint is not None:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                results = checkpoint['results']
+                start_task = last_completed_task + 1
+                print(f"✓ Resumed from task {last_completed_task}")
+                print(f"  Continuing from task {start_task}")
+            else:
+                print("⚠ Could not load checkpoint, starting from scratch")
+        else:
+            print("Use --resume to continue from checkpoint")
+            print("Starting fresh training...")
+    
     # Training loop
     print(f"\n{'='*60}")
-    print("Starting Continual Learning Training")
+    if start_task == 0:
+        print("Starting Continual Learning Training")
+    else:
+        print(f"Resuming Continual Learning Training from Task {start_task}")
     print(f"{'='*60}\n")
     
-    for task_id in range(args.num_tasks):
+    for task_id in range(start_task, args.num_tasks):
         print(f"\n{'='*60}")
         print(f"Training on Task {task_id}")
         print(f"{'='*60}\n")
@@ -152,26 +279,33 @@ def run_experiment(args):
             verbose=True
         )
         
-        # Evaluate on current task
-        print(f"\nEvaluating Task {task_id} after training...")
+        # Evaluate on current task (just trained) with frozen model
+        print(f"\nEvaluating Task {task_id} after training (model frozen)...")
         eval_metrics = evaluator.evaluate_task(
             test_loaders[task_id],
             task_id=task_id,
             verbose=True
         )
         
-        # Store baseline accuracy
+        # Store baseline accuracy (performance right after training this task)
         results['baseline_accuracies'][task_id] = eval_metrics['accuracy']
         
-        # Evaluate on all seen tasks so far
-        if task_id > 0:
-            print(f"\nEvaluating all tasks up to Task {task_id}...")
-            all_task_metrics = evaluator.evaluate_all_tasks(
-                test_loaders[:task_id+1],
-                verbose=True
-            )
-        else:
-            all_task_metrics = {0: eval_metrics, 'average': eval_metrics}
+        # Evaluate on ALL previous tasks + current task (with frozen model)
+        print(f"\nEvaluating current task ({task_id}) and all previous tasks (0-{task_id-1}) to measure forgetting...")
+        all_task_metrics = evaluator.evaluate_all_tasks(
+            test_loaders[:task_id+1],  # All tasks from 0 to task_id
+            verbose=True
+        )
+        
+        # Track per-task performance over time (for forgetting analysis)
+        for tid in range(task_id + 1):
+            if tid not in results['per_task_history']:
+                results['per_task_history'][tid] = []
+            results['per_task_history'][tid].append({
+                'after_training_task': task_id,
+                'accuracy': all_task_metrics[tid]['accuracy'],
+                'f1': all_task_metrics[tid]['f1']
+            })
         
         # Store results
         results['task_results'][task_id] = {
@@ -182,10 +316,20 @@ def run_experiment(args):
         
         print(f"\nTask {task_id} Summary:")
         print(f"  Train Acc: {train_metrics['accuracy']:.2f}%")
-        print(f"  Test Acc: {eval_metrics['accuracy']:.2f}%")
-        print(f"  Test F1: {eval_metrics['f1']:.2f}%")
+        print(f"  Test Acc (current task): {eval_metrics['accuracy']:.2f}%")
+        print(f"  Test F1 (current task): {eval_metrics['f1']:.2f}%")
+        print(f"  Avg Acc (all tasks 0-{task_id}): {all_task_metrics['average']['avg_accuracy']:.2f}%")
         if task_id > 0:
-            print(f"  Avg Acc (all tasks): {all_task_metrics['average']['avg_accuracy']:.2f}%")
+            print(f"  Previous tasks performance:")
+            for tid in range(task_id):
+                print(f"    Task {tid}: {all_task_metrics[tid]['accuracy']:.2f}% (baseline: {results['baseline_accuracies'][tid]:.2f}%)")
+        
+        # Save checkpoint after each task
+        if not args.no_checkpoint:
+            save_checkpoint(model, trainer.optimizer, task_id, results, ckpt_dir, args)
+        
+        # Ensure model returns to training mode for next task
+        model.train()
     
     # Final evaluation on all tasks
     print(f"\n{'='*60}")
@@ -290,6 +434,14 @@ def main():
                        help='Use CPU instead of GPU')
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='Output directory for results')
+    
+    # Checkpoint arguments
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
+                       help='Directory for saving/loading checkpoints')
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume from last checkpoint if available')
+    parser.add_argument('--no_checkpoint', action='store_true',
+                       help='Disable checkpoint saving/loading')
     
     args = parser.parse_args()
     

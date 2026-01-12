@@ -103,20 +103,31 @@ class ViT_CMS(nn.Module):
         print(f"Replacing MLP blocks with CMS (levels={cms_levels}, k={k})...")
         self.backbone = replace_mlp_with_cms(self.backbone, num_levels=cms_levels, k=k, verbose=False)
         
-        # Freeze backbone if requested
+        # Freeze backbone if requested (but keep CMS modules trainable)
         if freeze_backbone:
-            print("Freezing backbone parameters...")
+            print("Freezing backbone parameters (keeping CMS modules trainable)...")
             for name, param in self.backbone.named_parameters():
-                # Keep CMS parameters trainable
+                # Keep CMS parameters trainable (they contain 'levels' in their name)
                 if 'levels' not in name:
                     param.requires_grad = False
+                else:
+                    param.requires_grad = True  # Ensure CMS params are trainable
         
-        # Create head if num_classes specified
+        # Create head if num_classes specified (always trainable)
         self.head = None
         if num_classes is not None:
             self.head = nn.Linear(self.feature_dim, num_classes)
+            # Ensure head is always trainable
+            for param in self.head.parameters():
+                param.requires_grad = True
         
         self.num_classes = num_classes
+        
+        # Print trainable parameters summary
+        if freeze_backbone:
+            trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.parameters())
+            print(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
         
     def forward(self, x):
         """Forward pass through backbone and optional head."""
@@ -167,13 +178,13 @@ class ViT_Simple(nn.Module):
         # Get feature dimension
         self.feature_dim = self.backbone.num_features
         
-        # Freeze backbone if requested
+        # Freeze backbone if requested (but keep head trainable)
         if freeze_backbone:
-            print("Freezing backbone parameters...")
+            print("Freezing backbone parameters (keeping head trainable)...")
             for param in self.backbone.parameters():
                 param.requires_grad = False
         
-        # Create head
+        # Create head (always trainable)
         if head_layers == 2:
             self.head = nn.Sequential(
                 nn.Linear(self.feature_dim, hidden_dim),
@@ -192,6 +203,16 @@ class ViT_Simple(nn.Module):
             raise ValueError(f"head_layers must be 2 or 3, got {head_layers}")
         
         self.num_classes = num_classes
+        
+        # Ensure head is always trainable
+        for param in self.head.parameters():
+            param.requires_grad = True
+        
+        # Print trainable parameters summary
+        if freeze_backbone:
+            trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.parameters())
+            print(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
         
     def forward(self, x):
         """Forward pass through backbone and head."""

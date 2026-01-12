@@ -17,8 +17,9 @@ class SimpleCNN(nn.Module):
         num_classes: Number of output classes
         input_channels: Number of input channels (3 for RGB)
         hidden_dim: Hidden dimension scaling factor
+        input_size: Input image size (e.g., 32 for CIFAR-10, 224 for ImageNet-sized)
     """
-    def __init__(self, num_classes=10, input_channels=3, hidden_dim=64):
+    def __init__(self, num_classes=10, input_channels=3, hidden_dim=64, input_size=32):
         super().__init__()
         
         self.features = nn.Sequential(
@@ -41,8 +42,10 @@ class SimpleCNN(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
         
-        # Calculate feature dimension (for 32x32 input: 32->16->8->4)
-        self.feature_dim = hidden_dim * 4 * 4 * 4
+        # Calculate feature dimension dynamically based on input size
+        # After 3 max pools: size = input_size // (2^3)
+        feature_map_size = input_size // 8
+        self.feature_dim = hidden_dim * 4 * feature_map_size * feature_map_size
         
         self.classifier = nn.Sequential(
             nn.Flatten(),
@@ -167,11 +170,16 @@ class CNN_Replay(nn.Module):
         num_classes: Number of output classes
         buffer_size: Replay buffer size
         hidden_dim: CNN hidden dimension scaling
+        input_size: Input image size (e.g., 32 for CIFAR-10)
     """
-    def __init__(self, num_classes=10, buffer_size=1000, hidden_dim=64):
+    def __init__(self, num_classes=10, buffer_size=1000, hidden_dim=64, input_size=32):
         super().__init__()
         
-        self.cnn = SimpleCNN(num_classes=num_classes, hidden_dim=hidden_dim)
+        self.cnn = SimpleCNN(
+            num_classes=num_classes, 
+            hidden_dim=hidden_dim,
+            input_size=input_size
+        )
         self.replay_buffer = ReplayBuffer(buffer_size=buffer_size)
         self.num_classes = num_classes
         
