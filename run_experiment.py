@@ -1,364 +1,300 @@
 """
-Quick experiment launcher for continual learning experiments.
+Continual Learning Experiment Runner
 
 Usage:
-    python run_experiment.py --method vit_nested --strategy naive --dataset split_cifar10
-    python run_experiment.py --method vit_nested --strategy ewc --dataset split_cifar10 --epochs 10
-    python run_experiment.py --method vit_nested --strategy lwf --dataset split_mnist --num_tasks 5
+    python run_experiment.py --model vit_cms --dataset cifar10 --num_tasks 5 --epochs 10
 """
 
-import argparse
 import torch
-import torch.nn as nn
+import argparse
+import json
+import os
+from datetime import datetime
 from pathlib import Path
-import sys
 
-from model.vision_transformer_nested_learning import ViTNestedLearning, ViTNestedConfig
-from continual_learning.rivalry_strategies import (
-    NaiveStrategy, EWCStrategy, LwFStrategy, GEMStrategy, 
-    PackNetStrategy, SynapticIntelligence
-)
-from data.datasets import (
-    SplitCIFAR10, SplitCIFAR100, SplitMNIST, PermutedMNIST, RotatedMNIST,
-    ImageNet256, SplitImageFolder
-)
-from data.stream_loaders import OfflineStreamLoader
-from utils.runner import ExperimentRunner, RunConfig
-from utils.helpers import set_seed
+from models import ViT_CMS, ViT_Simple, CNN_Replay
+from datasets import get_cifar10_task_loaders, get_dataset_info
+from training import Trainer, Evaluator
 
 
-def get_model(model_size: str, num_classes: int, img_size: int = 32) -> nn.Module:
-    """Create model based on configuration"""
+def get_model(model_name, num_classes=2, device='cuda', **kwargs):
+    """
+    Create a model instance.
     
-    # ViT-Nested configurations
-    configs = {
-        'tiny': ViTNestedConfig(
-            img_size=img_size, patch_size=4, num_classes=num_classes,
-            dim=192, depth=6, num_heads=3, mlp_ratio=4.0,
-        ),
-        'small': ViTNestedConfig(
-            img_size=img_size, patch_size=4, num_classes=num_classes,
-            dim=384, depth=8, num_heads=6, mlp_ratio=4.0,
-        ),
-        'base': ViTNestedConfig(
-            img_size=img_size, patch_size=4, num_classes=num_classes,
-            dim=768, depth=12, num_heads=12, mlp_ratio=4.0,
-        ),
+    Args:
+        model_name: Name of the model ('vit_cms', 'vit_simple', 'cnn_replay')
+        num_classes: Number of output classes (2 for binary task-as-class)
+        device: Device to use
+        **kwargs: Additional model-specific arguments
+        
+    Returns:
+        Model instance
+    """
+    print(f"\n{'='*60}")
+    print(f"Initializing Model: {model_name}")
+    print(f"{'='*60}")
+    
+    if model_name == 'vit_cms':
+        model = ViT_CMS(
+            model_name='vit_base_patch16_224',
+            pretrained=kwargs.get('pretrained', True),
+            num_classes=num_classes,
+            cms_levels=kwargs.get('cms_levels', 3),
+            k=kwargs.get('k', 2),
+            freeze_backbone=kwargs.get('freeze_backbone', False)
+        )
+    elif model_name == 'vit_simple':
+        model = ViT_Simple(
+            model_name='vit_base_patch16_224',
+            pretrained=kwargs.get('pretrained', True),
+            num_classes=num_classes,
+            head_layers=kwargs.get('head_layers', 2),
+            hidden_dim=kwargs.get('hidden_dim', 512),
+            freeze_backbone=kwargs.get('freeze_backbone', False)
+        )
+    elif model_name == 'cnn_replay':
+        model = CNN_Replay(
+            num_classes=num_classes,
+            buffer_size=kwargs.get('buffer_size', 1000),
+            hidden_dim=kwargs.get('cnn_hidden_dim', 64)
+        )
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+    
+    print(f"Model initialized successfully!")
+    return model
+
+
+def run_experiment(args):
+    """
+    Run a continual learning experiment.
+    
+    Args:
+        args: Command-line arguments
+    """
+    # Set device
+    device = 'cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
+    print(f"\nUsing device: {device}")
+    
+    if device == 'cuda':
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Available GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    
+    # Get dataset info
+    dataset_info = get_dataset_info(args.dataset)
+    print(f"\nDataset: {dataset_info['name']}")
+    print(f"Task setup: {dataset_info['task_setup']}")
+    print(f"Number of tasks: {args.num_tasks}")
+    
+    # Create dataloaders
+    print(f"\nCreating dataloaders...")
+    train_loaders, test_loaders = get_cifar10_task_loaders(
+        data_root=args.data_root,
+        num_tasks=args.num_tasks,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        balance=True,
+        image_size=224  # ViT input size
+    )
+    
+    # Initialize model
+    model_kwargs = {
+        'pretrained': args.pretrained,
+        'cms_levels': args.cms_levels,
+        'k': args.k,
+        'freeze_backbone': args.freeze_backbone,
+        'head_layers': args.head_layers,
+        'hidden_dim': args.hidden_dim,
+        'buffer_size': args.buffer_size,
+        'cnn_hidden_dim': args.cnn_hidden_dim
+    }
+    model = get_model(args.model, num_classes=2, device=device, **model_kwargs)
+    
+    if device == 'cuda':
+        print(f"\nGPU Memory after model init: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+        torch.cuda.empty_cache()
+    
+    # Initialize trainer and evaluator
+    trainer = Trainer(
+        model=model,
+        device=device,
+        learning_rate=args.learning_rate,
+        use_replay=(args.model == 'cnn_replay'),
+        replay_batch_size=args.replay_batch_size
+    )
+    
+    evaluator = Evaluator(model=model, device=device)
+    
+    # Track results
+    results = {
+        'config': vars(args),
+        'dataset_info': dataset_info,
+        'task_results': {},
+        'baseline_accuracies': {},
+        'final_evaluation': {}
     }
     
-    if model_size not in configs:
-        raise ValueError(f"Unknown model size: {model_size}. Choose from {list(configs.keys())}")
+    # Training loop
+    print(f"\n{'='*60}")
+    print("Starting Continual Learning Training")
+    print(f"{'='*60}\n")
     
-    config = configs[model_size]
-    return ViTNestedLearning(config)
+    for task_id in range(args.num_tasks):
+        print(f"\n{'='*60}")
+        print(f"Training on Task {task_id}")
+        print(f"{'='*60}\n")
+        
+        # Train on current task
+        train_metrics = trainer.train_task(
+            train_loaders[task_id],
+            task_id=task_id,
+            epochs=args.epochs,
+            verbose=True
+        )
+        
+        # Evaluate on current task
+        print(f"\nEvaluating Task {task_id} after training...")
+        eval_metrics = evaluator.evaluate_task(
+            test_loaders[task_id],
+            task_id=task_id,
+            verbose=True
+        )
+        
+        # Store baseline accuracy
+        results['baseline_accuracies'][task_id] = eval_metrics['accuracy']
+        
+        # Evaluate on all seen tasks so far
+        if task_id > 0:
+            print(f"\nEvaluating all tasks up to Task {task_id}...")
+            all_task_metrics = evaluator.evaluate_all_tasks(
+                test_loaders[:task_id+1],
+                verbose=True
+            )
+        else:
+            all_task_metrics = {0: eval_metrics, 'average': eval_metrics}
+        
+        # Store results
+        results['task_results'][task_id] = {
+            'train_metrics': train_metrics,
+            'eval_metrics': eval_metrics,
+            'all_tasks_eval': all_task_metrics
+        }
+        
+        print(f"\nTask {task_id} Summary:")
+        print(f"  Train Acc: {train_metrics['accuracy']:.2f}%")
+        print(f"  Test Acc: {eval_metrics['accuracy']:.2f}%")
+        print(f"  Test F1: {eval_metrics['f1']:.2f}%")
+        if task_id > 0:
+            print(f"  Avg Acc (all tasks): {all_task_metrics['average']['avg_accuracy']:.2f}%")
+    
+    # Final evaluation on all tasks
+    print(f"\n{'='*60}")
+    print("Final Evaluation on All Tasks")
+    print(f"{'='*60}\n")
+    
+    final_results = evaluator.evaluate_all_tasks(test_loaders, verbose=True)
+    results['final_evaluation'] = final_results
+    
+    # Calculate forgetting
+    forgetting_metrics = evaluator.calculate_forgetting(
+        test_loaders,
+        results['baseline_accuracies']
+    )
+    results['forgetting_metrics'] = forgetting_metrics
+    
+    print(f"\nForgetting Analysis:")
+    print(f"  Average Forgetting: {forgetting_metrics['average_forgetting']:.2f}%")
+    for task_id, forget in forgetting_metrics['per_task_forgetting'].items():
+        print(f"  Task {task_id}: {forget:.2f}%")
+    
+    # Save results
+    save_results(results, args)
+    
+    print(f"\n{'='*60}")
+    print("Experiment Completed!")
+    print(f"{'='*60}\n")
+    
+    return results
 
 
-def get_strategy(strategy_type: str, model: nn.Module, device: str, **kwargs):
-    """Create continual learning strategy"""
+def save_results(results, args):
+    """Save experiment results to disk."""
+    # Create results directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_name = f"{args.model}_{args.dataset}_tasks{args.num_tasks}_{timestamp}"
+    results_dir = Path(args.output_dir) / exp_name
+    results_dir.mkdir(parents=True, exist_ok=True)
     
-    strategies = {
-        'naive': lambda: NaiveStrategy(model, device),
-        'ewc': lambda: EWCStrategy(
-            model, device,
-            lambda_ewc=kwargs.get('lambda_ewc', 5000.0),
-            fisher_sample_size=kwargs.get('fisher_sample_size', 200)
-        ),
-        'lwf': lambda: LwFStrategy(
-            model, device,
-            lambda_lwf=kwargs.get('lambda_lwf', 1.0),
-            temperature=kwargs.get('temperature', 2.0)
-        ),
-        'gem': lambda: GEMStrategy(
-            model, device,
-            memory_size=kwargs.get('memory_size', 256)
-        ),
-        'packnet': lambda: PackNetStrategy(
-            model, device,
-            prune_ratio=kwargs.get('prune_ratio', 0.5)
-        ),
-        'si': lambda: SynapticIntelligence(
-            model, device,
-            si_lambda=kwargs.get('si_lambda', 1.0),
-            xi=kwargs.get('xi', 1.0)
-        ),
-    }
+    # Save results as JSON
+    results_file = results_dir / 'results.json'
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
     
-    if strategy_type not in strategies:
-        raise ValueError(f"Unknown strategy: {strategy_type}. Choose from {list(strategies.keys())}")
+    print(f"\nResults saved to: {results_file}")
     
-    return strategies[strategy_type]()
-
-
-def get_dataset(dataset_name: str, num_tasks: int, data_dir: str = './data', **kwargs):
-    """Load dataset and create task loaders"""
+    # Save config
+    config_file = results_dir / 'config.json'
+    with open(config_file, 'w') as f:
+        json.dump(vars(args), f, indent=2)
     
-    datasets = {
-        'split_cifar10': SplitCIFAR10,
-        'split_cifar100': SplitCIFAR100,
-        'split_mnist': SplitMNIST,
-        'permuted_mnist': PermutedMNIST,
-        'rotated_mnist': RotatedMNIST,
-        'imagenet256': ImageNet256,
-        'split_image_folder': SplitImageFolder,
-    }
-    
-    if dataset_name not in datasets:
-        raise ValueError(f"Unknown dataset: {dataset_name}. Choose from {list(datasets.keys())}")
-    
-    dataset_cls = datasets[dataset_name]
-    dataset = dataset_cls(root=data_dir, num_tasks=num_tasks)
-    
-    return dataset
+    return results_dir
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run continual learning experiment')
+    parser = argparse.ArgumentParser(description='Continual Learning Experiments')
     
     # Model arguments
-    parser.add_argument('--method', type=str, default='vit_nested',
-                        help='Method name (currently only vit_nested)')
-    parser.add_argument('--model_size', type=str, default='tiny',
-                        choices=['tiny', 'small', 'base'],
-                        help='Model size')
+    parser.add_argument('--model', type=str, default='vit_cms',
+                       choices=['vit_cms', 'vit_simple', 'cnn_replay'],
+                       help='Model to use')
+    parser.add_argument('--pretrained', action='store_true', default=True,
+                       help='Use pretrained weights')
+    parser.add_argument('--cms_levels', type=int, default=3,
+                       help='Number of CMS levels (for vit_cms)')
+    parser.add_argument('--k', type=int, default=2,
+                       help='Speed multiplier: level i updates every k^i steps (for vit_cms)')
+    parser.add_argument('--freeze_backbone', action='store_true',
+                       help='Freeze backbone weights')
+    parser.add_argument('--head_layers', type=int, default=2,
+                       help='Number of head layers (for vit_simple)')
+    parser.add_argument('--hidden_dim', type=int, default=512,
+                       help='Hidden dimension for head')
+    parser.add_argument('--buffer_size', type=int, default=1000,
+                       help='Replay buffer size (for cnn_replay)')
+    parser.add_argument('--cnn_hidden_dim', type=int, default=64,
+                       help='CNN hidden dimension (for cnn_replay)')
     
-    # Strategy arguments
-    parser.add_argument('--strategy', type=str, default='naive',
-                        choices=['naive', 'ewc', 'lwf', 'gem', 'packnet', 'si'],
-                        help='Continual learning strategy')
-    parser.add_argument('--lambda_ewc', type=float, default=50000.0,
-                        help='EWC lambda parameter (default: 50000, higher = stronger regularization)')
-    parser.add_argument('--lambda_lwf', type=float, default=1.0,
-                        help='LwF lambda parameter')
-    parser.add_argument('--memory_size', type=int, default=256,
-                        help='GEM memory size')
-    
-    # Data arguments
-    parser.add_argument('--dataset', type=str, default='split_cifar10',
-                        choices=['split_cifar10', 'split_cifar100', 'split_mnist', 
-                                'permuted_mnist', 'rotated_mnist', 'imagenet256', 
-                                'split_image_folder'],
-                        help='Dataset to use')
+    # Dataset arguments
+    parser.add_argument('--dataset', type=str, default='cifar10',
+                       choices=['cifar10'],
+                       help='Dataset to use')
+    parser.add_argument('--data_root', type=str, default='./data',
+                       help='Root directory for data')
     parser.add_argument('--num_tasks', type=int, default=5,
-                        help='Number of tasks')
-    parser.add_argument('--data_dir', type=str, default='./data',
-                        help='Data directory')
+                       help='Number of tasks to train on')
     
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=5,
-                        help='Number of epochs per task')
+    parser.add_argument('--epochs', type=int, default=10,
+                       help='Number of epochs per task')
     parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size')
-    parser.add_argument('--lr', type=float, default=0.001,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.0001,
-                        help='Weight decay')
+                       help='Batch size')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                       help='Learning rate')
+    parser.add_argument('--replay_batch_size', type=int, default=16,
+                       help='Replay batch size')
+    parser.add_argument('--num_workers', type=int, default=2,
+                       help='Number of data loader workers')
     
     # System arguments
-    parser.add_argument('--device', type=str, default='cuda:0' if torch.cuda.is_available() else 'cpu',
-                        help='Device (cuda:0/cpu)')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--num_workers', type=int, default=None,
-                        help='Number of data loading workers (default: auto - 0 on Windows, 4 on Linux/Mac)')
-    parser.add_argument('--amp', action='store_true',
-                        help='Enable automatic mixed precision training (faster on modern GPUs)')
-    
-    # Experiment arguments
-    parser.add_argument('--save_dir', type=str, default='results',
-                        help='Directory to save results')
-    parser.add_argument('--experiment_name', type=str, default=None,
-                        help='Experiment name (auto-generated if not provided)')
-    parser.add_argument('--log_interval', type=int, default=50,
-                        help='Log interval')
-    parser.add_argument('--no_checkpoints', action='store_true',
-                        help='Disable checkpoint saving')
+    parser.add_argument('--cpu', action='store_true',
+                       help='Use CPU instead of GPU')
+    parser.add_argument('--output_dir', type=str, default='./results',
+                       help='Output directory for results')
     
     args = parser.parse_args()
     
-    # Auto-detect num_workers for Windows compatibility
-    if args.num_workers is None:
-        import platform
-        if platform.system() == 'Windows':
-            args.num_workers = 0  # Windows has issues with multiprocessing DataLoader
-            print("Note: Setting num_workers=0 for Windows compatibility")
-        else:
-            args.num_workers = 4  # Linux/Mac can use multiple workers
-    
-    # Set seed
-    set_seed(args.seed)
-    
-    # Auto-generate experiment name
-    if args.experiment_name is None:
-        # Will be updated after dataset loading to include single_class/group_class
-        args.experiment_name = None
-    
-    print(f"\n{'='*70}")
-    print(f"Continual Learning Experiment")
-    print(f"{'='*70}")
-    print(f"Method: {args.method} ({args.model_size})")
-    print(f"Strategy: {args.strategy}")
-    print(f"Dataset: {args.dataset} ({args.num_tasks} tasks)")
-    print(f"Epochs per task: {args.epochs}")
-    print(f"Device: {args.device}")
-    print(f"Experiment: {args.experiment_name}")
-    print(f"{'='*70}\n")
-    
-    try:
-        # Load dataset
-        print("Loading dataset...")
-        dataset = get_dataset(args.dataset, args.num_tasks, args.data_dir)
-        
-        # Determine image size and classes per task
-        if 'cifar' in args.dataset:
-            img_size = 32
-        elif 'mnist' in args.dataset:
-            img_size = 28
-        else:
-            img_size = 224  # ImageNet default
-        
-        # Get classes_per_task from dataset (default 1)
-        classes_per_task = getattr(dataset, 'classes_per_task', 1)
-        # CRITICAL: Model needs outputs for ALL classes in the dataset, not just per-task
-        # Otherwise with classes_per_task=1, all labels get remapped to 0 (trivial problem)
-        if 'cifar10' in args.dataset.lower():
-            num_classes = 10  # CIFAR-10 has 10 total classes
-        elif 'cifar100' in args.dataset.lower():
-            num_classes = 100  # CIFAR-100 has 100 total classes
-        elif 'mnist' in args.dataset.lower():
-            num_classes = 10  # MNIST has 10 total classes
-        else:
-            # For custom datasets, use total classes if available
-            num_classes = getattr(dataset, 'num_classes', classes_per_task * args.num_tasks)
-        
-        # Determine class mode for experiment name
-        class_mode = 'single_class' if classes_per_task == 1 else f'group_class_{classes_per_task}'
-        
-        # Generate experiment name if not provided
-        if args.experiment_name is None:
-            args.experiment_name = f"{class_mode}_{args.model_size}_{args.strategy}_{args.dataset}_tasks{args.num_tasks}_seed{args.seed}"
-        
-        print(f"Dataset: {args.dataset}")
-        print(f"Number of tasks: {args.num_tasks}")
-        print(f"Classes per task: {classes_per_task} ({class_mode})")
-        print(f"Model output size: {num_classes}")
-        print(f"Experiment name: {args.experiment_name}")
-        
-        # Create task loaders
-        print("Creating task loaders...")
-        task_loaders = []
-        for task_id in range(args.num_tasks):
-            train_dataset = dataset.get_task(task_id, train=True)
-            test_dataset = dataset.get_task(task_id, train=False)
-            
-            train_loader = torch.utils.data.DataLoader(
-                train_dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=args.num_workers,
-                pin_memory=True if 'cuda' in args.device else False,
-            )
-            
-            test_loader = torch.utils.data.DataLoader(
-                test_dataset,
-                batch_size=args.batch_size * 2,
-                shuffle=False,
-                num_workers=args.num_workers,
-                pin_memory=True if 'cuda' in args.device else False,
-            )
-            
-            task_loaders.append((train_loader, test_loader))
-        
-        print(f"Created {len(task_loaders)} task loaders")
-        
-        # Create model
-        print(f"Creating {args.model_size} model...")
-        model = get_model(args.model_size, num_classes, img_size)
-        
-        # Move model to device immediately
-        device = torch.device(args.device)
-        model = model.to(device)
-        
-        # Enable GPU optimizations if using CUDA
-        if device.type == 'cuda':
-            torch.backends.cudnn.benchmark = True  # Auto-tune for best performance
-            torch.backends.cudnn.deterministic = False  # Allows non-deterministic ops for speed
-            print(f"GPU optimizations enabled on {device}")
-        
-        # Count parameters
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Model parameters: {trainable_params:,} (total: {total_params:,})")
-        
-        # Create strategy
-        print(f"Creating {args.strategy} strategy...")
-        strategy = get_strategy(
-            args.strategy, model, args.device,
-            lambda_ewc=args.lambda_ewc,
-            lambda_lwf=args.lambda_lwf,
-            memory_size=args.memory_size,
-        )
-        
-        # Create run configuration
-        config = RunConfig(
-            method_name=args.method,
-            model_size=args.model_size,
-            num_classes=num_classes,
-            num_epochs=args.epochs,
-            batch_size=args.batch_size,
-            learning_rate=args.lr,
-            weight_decay=args.weight_decay,
-            strategy_type=args.strategy,
-            dataset_name=args.dataset,
-            num_tasks=args.num_tasks,
-            device=args.device,
-            seed=args.seed,
-            num_workers=args.num_workers,
-            save_dir=args.save_dir,
-            experiment_name=args.experiment_name,
-            log_interval=args.log_interval,
-            save_checkpoints=not args.no_checkpoints,
-            use_amp=args.amp,
-        )
-        
-        # Create runner and run experiment
-        print("\nInitializing experiment runner...")
-        runner = ExperimentRunner(config)
-        
-        print("\nStarting training...\n")
-        results = runner.run(model, strategy, task_loaders)
-        
-        # Print final summary
-        print("\n" + "="*70)
-        print("EXPERIMENT COMPLETED SUCCESSFULLY!")
-        print("="*70)
-        
-        if 'metrics' in results:
-            metrics = results['metrics']
-            print("\nFinal Metrics:")
-            print(f"  Average Accuracy: {metrics.get('average_accuracy', 0):.2f}%")
-            print(f"  Forgetting: {metrics.get('forgetting', 0):.2f}%")
-            print(f"  Forward Transfer: {metrics.get('forward_transfer', 0):.2f}%")
-            print(f"  Backward Transfer: {metrics.get('backward_transfer', 0):.2f}%")
-        
-        print(f"\nResults saved to: {runner.save_dir}")
-        print(f"  - Plots: {runner.plot_dir}")
-        print(f"  - Checkpoints: {runner.checkpoint_dir}")
-        print(f"  - Results JSON: {runner.save_dir / 'results.json'}")
-        
-        if results.get('errors'):
-            print(f"\nWarning: {len(results['errors'])} errors occurred during execution")
-            print("Check results.json for details")
-        
-        print("="*70 + "\n")
-        
-    except KeyboardInterrupt:
-        print("\n\nExperiment interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n\nFATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    # Run experiment
+    run_experiment(args)
 
 
 if __name__ == '__main__':
