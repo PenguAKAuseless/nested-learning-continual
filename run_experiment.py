@@ -13,7 +13,7 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
-from models import ViT_CMS, ViT_Simple, CNN_Replay
+from models import ViT_CMS, ViT_Simple, ViT_Replay, CNN_Replay
 from datasets import get_cifar10_task_loaders, get_dataset_info
 from training import Trainer, Evaluator
 
@@ -108,7 +108,7 @@ def check_existing_checkpoints(ckpt_dir, num_tasks):
     return max(completed_tasks) if completed_tasks else -1
 
 
-def get_model(model_name, num_classes=2, device='cuda', **kwargs):
+def get_model(model_name, num_classes=10, device='cuda', **kwargs):
     """
     Create a model instance.
     
@@ -131,17 +131,24 @@ def get_model(model_name, num_classes=2, device='cuda', **kwargs):
             pretrained=kwargs.get('pretrained', True),
             num_classes=num_classes,
             cms_levels=kwargs.get('cms_levels', 3),
-            k=kwargs.get('k', 2),
-            freeze_backbone=kwargs.get('freeze_backbone', False)
+            k=kwargs.get('k', 5)
         )
     elif model_name == 'vit_simple':
         model = ViT_Simple(
             model_name='vit_base_patch16_224',
             pretrained=kwargs.get('pretrained', True),
             num_classes=num_classes,
-            head_layers=kwargs.get('head_layers', 2),
+            head_layers=kwargs.get('head_layers', 3),
+            hidden_dim=kwargs.get('hidden_dim', 512)
+        )
+    elif model_name == 'vit_replay':
+        model = ViT_Replay(
+            model_name='vit_base_patch16_224',
+            pretrained=kwargs.get('pretrained', True),
+            num_classes=num_classes,
+            head_layers=kwargs.get('head_layers', 3),
             hidden_dim=kwargs.get('hidden_dim', 512),
-            freeze_backbone=kwargs.get('freeze_backbone', False)
+            buffer_size=kwargs.get('buffer_size', 1000)
         )
     elif model_name == 'cnn_replay':
         # CNN uses smaller image size (32x32) for efficiency
@@ -183,7 +190,7 @@ def run_experiment(args):
     # Create dataloaders
     print(f"\nCreating dataloaders...")
     # Use different image sizes for different models
-    image_size = 32 if args.model == 'cnn_replay' else 224
+    image_size = 32 if args.model == 'cnn_replay' else 224  # ViT models use 224
     train_loaders, test_loaders = get_cifar10_task_loaders(
         data_root=args.data_root,
         num_tasks=args.num_tasks,
@@ -198,14 +205,13 @@ def run_experiment(args):
         'pretrained': args.pretrained,
         'cms_levels': args.cms_levels,
         'k': args.k,
-        'freeze_backbone': args.freeze_backbone,
         'head_layers': args.head_layers,
         'hidden_dim': args.hidden_dim,
         'buffer_size': args.buffer_size,
         'cnn_hidden_dim': args.cnn_hidden_dim,
         'input_size': image_size  # Pass image size to CNN
     }
-    model = get_model(args.model, num_classes=2, device=device, **model_kwargs)
+    model = get_model(args.model, num_classes=10, device=device, **model_kwargs)
     
     if device == 'cuda':
         print(f"\nGPU Memory after model init: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
@@ -216,7 +222,7 @@ def run_experiment(args):
         model=model,
         device=device,
         learning_rate=args.learning_rate,
-        use_replay=(args.model == 'cnn_replay'),
+        use_replay=(args.model in ['cnn_replay', 'vit_replay']),
         replay_batch_size=args.replay_batch_size
     )
     
@@ -389,18 +395,16 @@ def main():
     
     # Model arguments
     parser.add_argument('--model', type=str, default='vit_cms',
-                       choices=['vit_cms', 'vit_simple', 'cnn_replay'],
+                       choices=['vit_cms', 'vit_simple', 'vit_replay', 'cnn_replay'],
                        help='Model to use')
     parser.add_argument('--pretrained', action='store_true', default=True,
                        help='Use pretrained weights')
     parser.add_argument('--cms_levels', type=int, default=3,
                        help='Number of CMS levels (for vit_cms)')
-    parser.add_argument('--k', type=int, default=2,
+    parser.add_argument('--k', type=int, default=5,
                        help='Speed multiplier: level i updates every k^i steps (for vit_cms)')
-    parser.add_argument('--freeze_backbone', action='store_true',
-                       help='Freeze backbone weights')
-    parser.add_argument('--head_layers', type=int, default=2,
-                       help='Number of head layers (for vit_simple)')
+    parser.add_argument('--head_layers', type=int, default=3,
+                       help='Number of head layers (for vit_simple and vit_replay)')
     parser.add_argument('--hidden_dim', type=int, default=512,
                        help='Hidden dimension for head')
     parser.add_argument('--buffer_size', type=int, default=1000,

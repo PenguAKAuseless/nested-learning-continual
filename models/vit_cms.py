@@ -79,7 +79,6 @@ class ViT_CMS(nn.Module):
         num_classes: Number of output classes (if different from pretrained)
         cms_levels: Number of nested levels in CMS modules
         k: Speed multiplier - level i updates every k^i steps
-        freeze_backbone: Whether to freeze the backbone (except CMS modules)
     """
     def __init__(
         self, 
@@ -87,8 +86,7 @@ class ViT_CMS(nn.Module):
         pretrained=True,
         num_classes=None,
         cms_levels=3,
-        k=2,
-        freeze_backbone=False
+        k=5
     ):
         super().__init__()
         
@@ -103,31 +101,12 @@ class ViT_CMS(nn.Module):
         print(f"Replacing MLP blocks with CMS (levels={cms_levels}, k={k})...")
         self.backbone = replace_mlp_with_cms(self.backbone, num_levels=cms_levels, k=k, verbose=False)
         
-        # Freeze backbone if requested (but keep CMS modules trainable)
-        if freeze_backbone:
-            print("Freezing backbone parameters (keeping CMS modules trainable)...")
-            for name, param in self.backbone.named_parameters():
-                # Keep CMS parameters trainable (they contain 'levels' in their name)
-                if 'levels' not in name:
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True  # Ensure CMS params are trainable
-        
-        # Create head if num_classes specified (always trainable)
+        # Create head if num_classes specified
         self.head = None
         if num_classes is not None:
             self.head = nn.Linear(self.feature_dim, num_classes)
-            # Ensure head is always trainable
-            for param in self.head.parameters():
-                param.requires_grad = True
         
         self.num_classes = num_classes
-        
-        # Print trainable parameters summary
-        if freeze_backbone:
-            trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-            total = sum(p.numel() for p in self.parameters())
-            print(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
         
     def forward(self, x):
         """Forward pass through backbone and optional head."""
@@ -158,16 +137,14 @@ class ViT_Simple(nn.Module):
         num_classes: Number of output classes
         head_layers: Number of linear layers in head (2 or 3)
         hidden_dim: Hidden dimension for multi-layer head
-        freeze_backbone: Whether to freeze the backbone
     """
     def __init__(
         self,
         model_name='vit_base_patch16_224',
         pretrained=True,
         num_classes=10,
-        head_layers=2,
-        hidden_dim=512,
-        freeze_backbone=False
+        head_layers=3,
+        hidden_dim=512
     ):
         super().__init__()
         
@@ -178,13 +155,7 @@ class ViT_Simple(nn.Module):
         # Get feature dimension
         self.feature_dim = self.backbone.num_features
         
-        # Freeze backbone if requested (but keep head trainable)
-        if freeze_backbone:
-            print("Freezing backbone parameters (keeping head trainable)...")
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-        
-        # Create head (always trainable)
+        # Create head
         if head_layers == 2:
             self.head = nn.Sequential(
                 nn.Linear(self.feature_dim, hidden_dim),
@@ -203,16 +174,6 @@ class ViT_Simple(nn.Module):
             raise ValueError(f"head_layers must be 2 or 3, got {head_layers}")
         
         self.num_classes = num_classes
-        
-        # Ensure head is always trainable
-        for param in self.head.parameters():
-            param.requires_grad = True
-        
-        # Print trainable parameters summary
-        if freeze_backbone:
-            trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-            total = sum(p.numel() for p in self.parameters())
-            print(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
         
     def forward(self, x):
         """Forward pass through backbone and head."""
@@ -241,3 +202,100 @@ class ViT_Simple(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, num_classes)
             )
+
+
+class ViT_Replay(nn.Module):
+    """
+    Standard Vision Transformer with simple linear head and replay buffer.
+    Combines pretrained ViT backbone with experience replay for continual learning.
+    
+    Args:
+        model_name: Name of the timm model
+        pretrained: Load pretrained ImageNet weights
+        num_classes: Number of output classes
+        head_layers: Number of linear layers in head (2 or 3)
+        hidden_dim: Hidden dimension for multi-layer head
+        buffer_size: Size of the replay buffer
+    """
+    def __init__(
+        self,
+        model_name='vit_base_patch16_224',
+        pretrained=True,
+        num_classes=10,
+        head_layers=3,
+        hidden_dim=512,
+        buffer_size=1000
+    ):
+        super().__init__()
+        
+        # Load pretrained ViT
+        print(f"Loading {model_name} (pretrained={pretrained})...")
+        self.backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
+        
+        # Get feature dimension
+        self.feature_dim = self.backbone.num_features
+        
+        # Create head
+        if head_layers == 2:
+            self.head = nn.Sequential(
+                nn.Linear(self.feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, num_classes)
+            )
+        elif head_layers == 3:
+            self.head = nn.Sequential(
+                nn.Linear(self.feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, num_classes)
+            )
+        else:
+            raise ValueError(f"head_layers must be 2 or 3, got {head_layers}")
+        
+        self.num_classes = num_classes
+        
+        # Create replay buffer
+        from .cnn_baseline import ReplayBuffer
+        self.replay_buffer = ReplayBuffer(buffer_size=buffer_size)
+        print(f"Initialized replay buffer with size {buffer_size}")
+        
+    def forward(self, x):
+        """Forward pass through backbone and head."""
+        features = self.backbone(x)
+        return self.head(features)
+    
+    def get_features(self, x):
+        """Extract features without classification head."""
+        return self.backbone(x)
+    
+    def set_head(self, num_classes, head_layers=3, hidden_dim=512):
+        """Set or replace the classification head."""
+        self.num_classes = num_classes
+        
+        if head_layers == 2:
+            self.head = nn.Sequential(
+                nn.Linear(self.feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, num_classes)
+            )
+        elif head_layers == 3:
+            self.head = nn.Sequential(
+                nn.Linear(self.feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, num_classes)
+            )
+    
+    def add_to_buffer(self, images, labels, task_id):
+        """Add samples to replay buffer."""
+        self.replay_buffer.add_samples(images, labels, task_id)
+    
+    def sample_from_buffer(self, batch_size):
+        """Sample from replay buffer."""
+        return self.replay_buffer.sample(batch_size)
+    
+    def get_buffer_size(self):
+        """Get current replay buffer size."""
+        return len(self.replay_buffer)

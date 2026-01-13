@@ -34,9 +34,11 @@ def run_experiment(model, num_tasks=2, epochs=3, batch_size=16):
     
     # Add model-specific args
     if model == "vit_cms":
-        cmd.extend(["--cms_levels", "3", "--k", "2"])
+        cmd.extend(["--cms_levels", "3", "--k", "5"])
     elif model == "vit_simple":
-        cmd.extend(["--head_layers", "2"])
+        cmd.extend(["--head_layers", "3"])
+    elif model == "vit_replay":
+        cmd.extend(["--head_layers", "3", "--buffer_size", "1000"])
     elif model == "cnn_replay":
         cmd.extend(["--buffer_size", "1000"])
     
@@ -118,7 +120,7 @@ def create_forgetting_figure(all_results: Dict, num_tasks: int, output_dir: Path
     if num_tasks == 1:
         axes = [axes]
     
-    colors = {'vit_cms': 'blue', 'vit_simple': 'green', 'cnn_replay': 'red'}
+    colors = {'vit_cms': 'blue', 'vit_simple': 'green', 'vit_replay': 'orange', 'cnn_replay': 'red'}
     
     for task_id in range(num_tasks):
         ax = axes[task_id]
@@ -164,9 +166,9 @@ def main():
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Configuration
-    models = ["vit_cms", "vit_simple", "cnn_replay"]
-    num_tasks = 2  # Start with 2 tasks for testing
-    epochs = 3     # 3 epochs for quick testing
+    models = ["vit_cms", "vit_simple", "vit_replay", "cnn_replay"]
+    num_tasks = 5  # Start with 5 tasks for testing
+    epochs = 5     # 5 epochs for testing
     batch_size = 16  # Smaller batch for GPU memory safety
     
     print(f"\nConfiguration:")
