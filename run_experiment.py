@@ -230,6 +230,16 @@ def run_experiment(args):
         'input_size': image_size  # Pass image size to CNN
     }
     model = get_model(args.model, num_classes=10, device=device, **model_kwargs)
+    print("Initializing Head weights to 0 to prevent random noise dominance...")
+    if hasattr(model, 'head') and isinstance(model.head, torch.nn.Linear):
+        torch.nn.init.constant_(model.head.weight, 0)
+        torch.nn.init.constant_(model.head.bias, 0)
+    elif hasattr(model, 'heads'): # Trường hợp Multi-head (nếu có dùng)
+        for h in model.heads:
+            torch.nn.init.constant_(h.weight, 0)
+            torch.nn.init.constant_(h.bias, 0)
+            
+    model.to(device)
     
     if device == 'cuda':
         print(f"\nGPU Memory after model init: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
