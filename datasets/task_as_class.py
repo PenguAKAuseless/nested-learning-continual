@@ -1,110 +1,97 @@
 """
-Task-as-Class Dataset Loaders for Continual Learning
+Task-based Dataset Loaders for Continual Learning
 
-Each task is a binary classification: one class vs all others.
-Task 1: class 0 vs others
-Task 2: class 1 vs others
-...
-Task N: class N-1 vs others
+Each task learns a subset of classes with shared output space.
+For CIFAR-10 with 5 tasks:
+Task 0: classes 0-1
+Task 1: classes 2-3
+Task 2: classes 4-5
+Task 3: classes 6-7
+Task 4: classes 8-9
+
+All tasks share the same output space (0-9), allowing multi-task evaluation.
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision import datasets, transforms
 import numpy as np
 from typing import Tuple, List, Optional
 
 
-class TaskAsClassDataset(Dataset):
+class TaskDataset(Dataset):
     """
-    Converts a multi-class dataset into a task-as-class binary dataset.
+    Creates a task-specific dataset from a subset of classes.
     
     Args:
         base_dataset: The underlying dataset (e.g., CIFAR10)
-        target_class: The class to distinguish (label=1), all others are label=0
-        balance: Whether to balance positive and negative samples
+        task_classes: List of class indices for this task (e.g., [0, 1])
     """
-    def __init__(self, base_dataset, target_class: int, balance: bool = True):
+    def __init__(self, base_dataset, task_classes: List[int]):
         self.base_dataset = base_dataset
-        self.target_class = target_class
-        self.balance = balance
+        self.task_classes = task_classes
         
-        # Get all indices - optimize by checking targets directly if available
+        # Get indices for samples belonging to task classes
         if hasattr(base_dataset, 'targets'):
             # Fast path for datasets with targets attribute
             targets = base_dataset.targets
             if isinstance(targets, list):
                 targets = np.array(targets)
             
-            self.positive_indices = np.where(targets == target_class)[0].tolist()
-            self.negative_indices = np.where(targets != target_class)[0].tolist()
+            # Find all samples belonging to any of the task classes
+            mask = np.isin(targets, task_classes)
+            self.indices = np.where(mask)[0].tolist()
         else:
             # Fallback to slower method
-            all_indices = list(range(len(base_dataset)))
-            self.positive_indices = []
-            self.negative_indices = []
-            
-            for idx in all_indices:
+            self.indices = []
+            for idx in range(len(base_dataset)):
                 _, label = base_dataset[idx]
-                if label == target_class:
-                    self.positive_indices.append(idx)
-                else:
-                    self.negative_indices.append(idx)
-        
-        # Balance if requested
-        if balance and len(self.positive_indices) > 0:
-            # Sample negative to match positive count
-            n_positive = len(self.positive_indices)
-            n_negative = len(self.negative_indices)
-            
-            if n_negative > n_positive:
-                # Randomly sample negative examples
-                np.random.seed(42)
-                self.negative_indices = list(np.random.choice(
-                    self.negative_indices, 
-                    size=n_positive, 
-                    replace=False
-                ))
-        
-        # Combine indices
-        self.indices = self.positive_indices + self.negative_indices
+                if label in task_classes:
+                    self.indices.append(idx)
         
     def __len__(self):
         return len(self.indices)
     
     def __getitem__(self, idx):
-        # Get original sample
+        # Get original sample - labels remain unchanged (0-9 for CIFAR-10)
         original_idx = self.indices[idx]
-        image, original_label = self.base_dataset[original_idx]
-        
-        # Convert to binary label
-        binary_label = 1 if original_label == self.target_class else 0
-        
-        return image, binary_label
+        image, label = self.base_dataset[original_idx]
+        return image, label
 
 
 def get_cifar10_task_loaders(
     data_root: str = './data',
-    num_tasks: int = 10,
+    num_tasks: int = 5,
     batch_size: int = 64,
     num_workers: int = 2,
     balance: bool = True,
     image_size: int = 224
 ) -> Tuple[List[DataLoader], List[DataLoader]]:
     """
-    Create task-as-class dataloaders for CIFAR-10.
+    Create task-based dataloaders for CIFAR-10.
+    
+    Splits 10 classes into num_tasks tasks evenly.
+    For 5 tasks: Task 0=[0,1], Task 1=[2,3], Task 2=[4,5], Task 3=[6,7], Task 4=[8,9]
+    All tasks share the same output space (0-9), enabling multi-task evaluation.
     
     Args:
         data_root: Root directory for data
-        num_tasks: Number of tasks (classes) to use
+        num_tasks: Number of tasks to split classes into (default: 5 for CIFAR-10)
         batch_size: Batch size for dataloaders
         num_workers: Number of workers for dataloaders
-        balance: Balance positive/negative samples
+        balance: Not used (kept for compatibility)
         image_size: Resize images to this size (224 for ViT)
         
     Returns:
         Tuple of (train_loaders, test_loaders), each a list of dataloaders
     """
+    # CIFAR-10 has 10 classes
+    total_classes = 10
+    classes_per_task = total_classes // num_tasks
+    
+    if total_classes % num_tasks != 0:
+        raise ValueError(f"Cannot evenly split {total_classes} classes into {num_tasks} tasks")
+    
     # Define transforms
     train_transform = transforms.Compose([
         transforms.Resize(image_size),
@@ -141,10 +128,18 @@ def get_cifar10_task_loaders(
     train_loaders = []
     test_loaders = []
     
+    class_names = ['airplane', 'automobile', 'bird', 'cat', 'deer',
+                   'dog', 'frog', 'horse', 'ship', 'truck']
+    
     for task_id in range(num_tasks):
+        # Determine which classes belong to this task
+        start_class = task_id * classes_per_task
+        end_class = start_class + classes_per_task
+        task_classes = list(range(start_class, end_class))
+        
         # Create task datasets
-        task_train = TaskAsClassDataset(train_dataset, target_class=task_id, balance=balance)
-        task_test = TaskAsClassDataset(test_dataset, target_class=task_id, balance=balance)
+        task_train = TaskDataset(train_dataset, task_classes)
+        task_test = TaskDataset(test_dataset, task_classes)
         
         # Create dataloaders
         train_loader = DataLoader(
@@ -166,7 +161,8 @@ def get_cifar10_task_loaders(
         train_loaders.append(train_loader)
         test_loaders.append(test_loader)
         
-        print(f"Task {task_id} (class {task_id}): "
+        class_names_str = ', '.join([class_names[c] for c in task_classes])
+        print(f"Task {task_id} (classes {task_classes} = {class_names_str}): "
               f"Train={len(task_train)}, Test={len(task_test)}")
     
     return train_loaders, test_loaders
@@ -192,7 +188,7 @@ def get_dataset_info(dataset_name: str = 'cifar10') -> dict:
                 'airplane', 'automobile', 'bird', 'cat', 'deer',
                 'dog', 'frog', 'horse', 'ship', 'truck'
             ],
-            'task_setup': 'Each task is binary classification: one class vs all others',
+            'task_setup': 'Multi-class continual learning: classes split across tasks with shared output space (0-9)',
             'num_train': 50000,
             'num_test': 10000
         }

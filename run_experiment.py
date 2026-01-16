@@ -115,7 +115,7 @@ def get_model(model_name, num_classes=10, device='cuda', **kwargs):
     
     Args:
         model_name: Name of the model ('vit_cms', 'vit_simple', 'cnn_replay')
-        num_classes: Number of output classes (2 for binary task-as-class)
+        num_classes: Number of output classes (10 for CIFAR-10)
         device: Device to use
         **kwargs: Additional model-specific arguments
         

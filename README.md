@@ -25,10 +25,14 @@ python test_setup.py
 
 ## Experiment Setup
 
-**Dataset**: CIFAR-10 with task-as-class setup
-- Task 0: class 0 vs others (binary classification)
-- Task 1: class 1 vs others
-- ... up to Task 9
+**Dataset**: CIFAR-10 with multi-class continual learning setup
+- Task 0: classes 0-1 (airplane, automobile)
+- Task 1: classes 2-3 (bird, cat)
+- Task 2: classes 4-5 (deer, dog)
+- Task 3: classes 6-7 (frog, horse)
+- Task 4: classes 8-9 (ship, truck)
+
+All tasks share the same 10-class output space (0-9), enabling proper multi-task evaluation.
 
 **Metrics**: Accuracy, F1, Forgetting (performance drop on previous tasks)
 
