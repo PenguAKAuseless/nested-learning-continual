@@ -19,6 +19,7 @@ from pathlib import Path
 from models import ViT_CMS, ViT_Simple, ViT_Replay, CNN_Replay
 from my_datasets.task_as_class import get_cifar10_task_loaders, get_dataset_info
 from training import Trainer, Evaluator
+from training.cms_optim import CMSOptimizerWrapper
 
 
 def get_config_hash(config_dict):
@@ -215,17 +216,33 @@ def run_experiment(args):
         'input_size': image_size  # Pass image size to CNN
     }
     model = get_model(args.model, num_classes=10, device=device, **model_kwargs)
+    model.to(device)
     
     if device == 'cuda':
         print(f"\nGPU Memory after model init: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
         torch.cuda.empty_cache()
     
-    # Initialize trainer and evaluator
+    # Initialize the Base Optimizer
+    base_optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        lr=args.learning_rate,
+        weight_decay=1e-4
+    )
+    
+    # Wrap it with CMSOptimizerWrapper if using CMS model
+    if args.model == 'vit_cms':
+        print(f"Enabling CMS Optimizer with k={args.k} for Nested Learning updates.")
+        optimizer = CMSOptimizerWrapper(base_optimizer, model, k_factor=args.k)
+    else:
+        optimizer = base_optimizer
+
+    # Pass the wrapped optimizer to Trainer
     trainer = Trainer(
         model=model,
         device=device,
+        optimizer=optimizer,
         learning_rate=args.learning_rate,
-        use_replay=(args.model in ['cnn_replay', 'vit_replay']),
+        use_replay=(args.model in ['cnn_replay', 'vit_replay','vit_cms']),
         replay_batch_size=args.replay_batch_size
     )
     

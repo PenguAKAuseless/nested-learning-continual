@@ -1,90 +1,34 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from models.cms import CMS
 
 class Trainer:
-    def __init__(self, model, device, learning_rate=1e-3, use_replay=False, replay_batch_size=16):
+    def __init__(self, model, device, optimizer=None, learning_rate=1e-3, use_replay=False, replay_batch_size=16):
+        """
+        Args:
+            model: PyTorch model
+            device: Computing device (cpu/cuda)
+            optimizer: Passed optimizer (can be CMSOptimizerWrapper). If None, creates a default AdamW.
+            learning_rate: Used only if optimizer is None.
+            use_replay: Enable experience replay
+            replay_batch_size: Number of replay samples per batch
+        """
         self.model = model
         self.device = device
         self.use_replay = use_replay
         self.replay_batch_size = replay_batch_size
         self.criterion = nn.CrossEntropyLoss()
-        
-        # --- CẢI TIẾN 1: Tinh chỉnh Optimizer theo từng Level ---
-        self.optimizer = self._create_hierarchical_optimizer(model, learning_rate)
-
-    def _create_hierarchical_optimizer(self, model, base_lr):
-        """
-        Tạo Optimizer với Learning Rate và Weight Decay khác nhau cho từng Level của CMS.
-        Nguyên lý:
-        - Level 0 (Fast): Học nhanh (High LR), Quên nhanh (High Decay) -> Plasticity
-        - Level N (Slow): Học chậm (Low LR), Nhớ lâu (Low Decay) -> Stability
-        """
-        params_groups = []
-        memo = set()
-
-        # 1. Tách tham số của CMS
-        for module_name, module in model.named_modules():
-            if isinstance(module, CMS):
-                for level_idx, level_module in enumerate(module.levels):
-                    # Tính toán hệ số điều chỉnh dựa trên level
-                    # Level càng cao -> k^i càng lớn -> Tần số cập nhật thấp
-                    # Scaling factor: Giảm LR theo lũy thừa của k (hoặc căn bậc 2)
-                    
-                    # Giả sử k=module.k (ví dụ k=2)
-                    # Level 0: scale = 1.0
-                    # Level 1: scale = 0.5
-                    # Level 2: scale = 0.25
-                    k_factor = module.k
-                    scale = 1.0 / (k_factor ** level_idx) # Hoặc 1.0 / sqrt(k**i)
-                    
-                    decay_scale = 1.0 
-                    # Fast weights (Level 0) cần decay mạnh để tránh bias task cũ?
-                    # Hoặc Slow weights cần decay mạnh? 
-                    # Theo bài báo: Slow weights cần ổn định => Weight Decay thấp hơn.
-                    
-                    wd_scale = scale # Decay cũng giảm theo level
-                    
-                    level_params = []
-                    for p in level_module.parameters():
-                        if p not in memo:
-                            level_params.append(p)
-                            memo.add(p)
-                    
-                    if level_params:
-                        params_groups.append({
-                            'params': level_params,
-                            'lr': base_lr * scale,
-                            'weight_decay': 1e-4 * wd_scale,
-                            'name': f"cms_level_{level_idx}"
-                        })
-
-        # 2. Các tham số còn lại (Backbone không phải CMS, Head, Norm...)
-        backbone_params = []
-        for p in model.parameters():
-            if p not in memo:
-                backbone_params.append(p)
-        
-        if backbone_params:
-            params_groups.append({
-                'params': backbone_params,
-                'lr': base_lr, # Base LR cho các phần tĩnh
-                'weight_decay': 1e-4,
-                'name': "backbone_standard"
-            })
-            
-        print(f"[Trainer] Optimizer initialized with {len(params_groups)} groups.")
-        for g in params_groups:
-            print(f"  - {g['name']}: lr={g['lr']:.6f}, wd={g['weight_decay']:.6f}")
-
-        return optim.AdamW(params_groups)
+        if optimizer is not None:
+            self.optimizer = optimizer
+        else:
+            self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
     def train_task(self, train_loader, task_id, epochs=1, verbose=True):
         self.model.train()
         history = {'loss': [], 'accuracy': []}
         
-        print(f"Training Task {task_id} for {epochs} epochs...")
+        if verbose:
+            print(f"Training Task {task_id} for {epochs} epochs...")
         
         for epoch in range(epochs):
             total_loss = 0
@@ -94,24 +38,29 @@ class Trainer:
             for batch_idx, (data, target) in enumerate(train_loader):
                 data, target = data.to(self.device), target.to(self.device)
                 
-                # Replay Logic (Nếu có)
+                # Replay Logic
                 if self.use_replay and hasattr(self.model, 'sample_from_buffer') and self.model.get_buffer_size() > 0:
-                    buf_data, buf_target = self.model.sample_from_buffer(self.replay_batch_size)
-                    buf_data, buf_target = buf_data.to(self.device), buf_target.to(self.device)
-                    data = torch.cat([data, buf_data])
-                    target = torch.cat([target, buf_target])
+                    try:
+                        buf_data, buf_target = self.model.sample_from_buffer(self.replay_batch_size)
+                        buf_data, buf_target = buf_data.to(self.device), buf_target.to(self.device)
+                        data = torch.cat([data, buf_data])
+                        target = torch.cat([target, buf_target])
+                    except ValueError:
+                        pass # Bỏ qua nếu buffer chưa đủ dữ liệu
                 
                 self.optimizer.zero_grad()
                 
-                # --- Quan trọng: CMS forward sẽ tự update step_counter bên trong ---
+                # Forward pass
                 output = self.model(data)
-                
                 loss = self.criterion(output, target)
+                
+                # Backward pass
                 loss.backward()
                 
-                # Gradient Clipping để ổn định huấn luyện mạng sâu
+                # Gradient Clipping (khuyên dùng cho mạng sâu/CMS)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 
+                # Step (CMSOptimizerWrapper sẽ tự xử lý việc chặn cập nhật các tầng chậm)
                 self.optimizer.step()
                 
                 total_loss += loss.item()
@@ -127,15 +76,16 @@ class Trainer:
             if verbose:
                 print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Acc: {accuracy:.2f}%")
         
-        # Add to replay buffer after task completion (nếu model hỗ trợ)
+        # Add to replay buffer after task completion
         if self.use_replay and hasattr(self.model, 'add_to_buffer'):
             print("Updating Replay Buffer...")
-            # Lấy một subset mẫu từ train_loader để lưu
-            # (Code giản lược, thực tế cần lấy ngẫu nhiên)
             count = 0
-            for data, target in train_loader:
-                if count >= 200: break # Lưu khoảng 200 mẫu mỗi task
-                self.model.add_to_buffer(data, target, task_id)
-                count += len(data)
+            self.model.eval() # Chuyển sang eval để tránh ảnh hưởng batchnorm khi lấy mẫu
+            with torch.no_grad():
+                for data, target in train_loader:
+                    if count >= 200: break
+                    self.model.add_to_buffer(data, target, task_id)
+                    count += len(data)
+            self.model.train()
 
         return {'loss': avg_loss, 'accuracy': accuracy, 'history': history}
