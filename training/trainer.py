@@ -1,91 +1,137 @@
+"""
+Training Pipeline for Continual Learning
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader
+from typing import Dict, Optional
+from tqdm import tqdm
+
 
 class Trainer:
-    def __init__(self, model, device, optimizer=None, learning_rate=1e-3, use_replay=False, replay_batch_size=16):
-        """
-        Args:
-            model: PyTorch model
-            device: Computing device (cpu/cuda)
-            optimizer: Passed optimizer (can be CMSOptimizerWrapper). If None, creates a default AdamW.
-            learning_rate: Used only if optimizer is None.
-            use_replay: Enable experience replay
-            replay_batch_size: Number of replay samples per batch
-        """
-        self.model = model
+    """
+    Trainer for continual learning experiments.
+    
+    Args:
+        model: The model to train
+        device: Device to use (cuda/cpu)
+        learning_rate: Learning rate
+        use_replay: Whether to use replay buffer (for CNN_Replay)
+        replay_batch_size: Batch size for replay samples
+    """
+    def __init__(
+        self,
+        model: nn.Module,
+        device: str = 'cuda',
+        learning_rate: float = 1e-4,
+        use_replay: bool = False,
+        replay_batch_size: int = 32
+    ):
+        self.model = model.to(device)
         self.device = device
+        self.learning_rate = learning_rate
         self.use_replay = use_replay
         self.replay_batch_size = replay_batch_size
-        self.criterion = nn.CrossEntropyLoss()
-        if optimizer is not None:
-            self.optimizer = optimizer
-        else:
-            self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-
-    def train_task(self, train_loader, task_id, epochs=1, verbose=True):
-        self.model.train()
-        history = {'loss': [], 'accuracy': []}
         
-        if verbose:
-            print(f"Training Task {task_id} for {epochs} epochs...")
+        # Loss and optimizer
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+        
+    def train_task(
+        self,
+        train_loader: DataLoader,
+        task_id: int,
+        epochs: int = 10,
+        verbose: bool = True
+    ) -> Dict[str, float]:
+        """
+        Train on a single task.
+        
+        Args:
+            train_loader: DataLoader for the task
+            task_id: Task identifier
+            epochs: Number of epochs to train
+            verbose: Print progress
+            
+        Returns:
+            Dictionary with training metrics
+        """
+        self.model.train()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
         
         for epoch in range(epochs):
-            total_loss = 0
-            correct = 0
-            total = 0
+            epoch_loss = 0.0
+            epoch_correct = 0
+            epoch_samples = 0
             
-            for batch_idx, (data, target) in enumerate(train_loader):
-                data, target = data.to(self.device), target.to(self.device)
-                
-                # Replay Logic
-                if self.use_replay and hasattr(self.model, 'sample_from_buffer') and self.model.get_buffer_size() > 0:
-                    try:
-                        buf_data, buf_target = self.model.sample_from_buffer(self.replay_batch_size)
-                        buf_data, buf_target = buf_data.to(self.device), buf_target.to(self.device)
-                        data = torch.cat([data, buf_data])
-                        target = torch.cat([target, buf_target])
-                    except ValueError:
-                        pass # Bỏ qua nếu buffer chưa đủ dữ liệu
-                
-                self.optimizer.zero_grad()
+            pbar = tqdm(train_loader, desc=f"Task {task_id} Epoch {epoch+1}/{epochs}") if verbose else train_loader
+            
+            for batch_idx, (images, labels) in enumerate(pbar):
+                images, labels = images.to(self.device), labels.to(self.device)
                 
                 # Forward pass
-                output = self.model(data)
-                loss = self.criterion(output, target)
+                outputs = self.model(images)
+                loss = self.criterion(outputs, labels)
+                
+                # Add replay samples if enabled
+                if self.use_replay and hasattr(self.model, 'sample_from_buffer'):
+                    replay_images, replay_labels, _ = self.model.sample_from_buffer(self.replay_batch_size)
+                    if replay_images is not None:
+                        replay_images = replay_images.to(self.device)
+                        replay_labels = replay_labels.to(self.device)
+                        replay_outputs = self.model(replay_images)
+                        replay_loss = self.criterion(replay_outputs, replay_labels)
+                        loss = loss + replay_loss
                 
                 # Backward pass
+                self.optimizer.zero_grad()
                 loss.backward()
-                
-                # Gradient Clipping (khuyên dùng cho mạng sâu/CMS)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                
-                # Step (CMSOptimizerWrapper sẽ tự xử lý việc chặn cập nhật các tầng chậm)
                 self.optimizer.step()
                 
-                total_loss += loss.item()
-                pred = output.argmax(dim=1, keepdim=True)
-                correct += pred.eq(target.view_as(pred)).sum().item()
-                total += target.size(0)
+                # Add to replay buffer if enabled
+                if self.use_replay and hasattr(self.model, 'add_to_buffer'):
+                    # Add subset of current batch to buffer
+                    if batch_idx % 5 == 0:  # Add every 5th batch
+                        self.model.add_to_buffer(images, labels, task_id)
+                
+                # Track metrics
+                _, predicted = outputs.max(1)
+                correct = predicted.eq(labels).sum().item()
+                
+                epoch_loss += loss.item()
+                epoch_correct += correct
+                epoch_samples += labels.size(0)
+                
+                if verbose and isinstance(pbar, tqdm):
+                    pbar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'acc': f'{100. * correct / labels.size(0):.2f}%'
+                    })
             
-            avg_loss = total_loss / len(train_loader)
-            accuracy = 100. * correct / total
-            history['loss'].append(avg_loss)
-            history['accuracy'].append(accuracy)
-            
+            # Epoch summary
+            epoch_acc = 100. * epoch_correct / epoch_samples
             if verbose:
-                print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Acc: {accuracy:.2f}%")
+                print(f"Task {task_id} Epoch {epoch+1}: Loss={epoch_loss/len(train_loader):.4f}, Acc={epoch_acc:.2f}%")
+            
+            total_loss += epoch_loss
+            total_correct += epoch_correct
+            total_samples += epoch_samples
         
-        # Add to replay buffer after task completion
-        if self.use_replay and hasattr(self.model, 'add_to_buffer'):
-            print("Updating Replay Buffer...")
-            count = 0
-            self.model.eval() # Chuyển sang eval để tránh ảnh hưởng batchnorm khi lấy mẫu
-            with torch.no_grad():
-                for data, target in train_loader:
-                    if count >= 200: break
-                    self.model.add_to_buffer(data, target, task_id)
-                    count += len(data)
-            self.model.train()
-
-        return {'loss': avg_loss, 'accuracy': accuracy, 'history': history}
+        # Return metrics
+        avg_loss = total_loss / (epochs * len(train_loader))
+        avg_acc = 100. * total_correct / total_samples
+        
+        return {
+            'loss': avg_loss,
+            'accuracy': avg_acc
+        }
+    
+    def set_learning_rate(self, lr: float):
+        """Update learning rate."""
+        self.learning_rate = lr
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr

@@ -85,14 +85,16 @@ class Evaluator:
         all_predictions = np.array(all_predictions)
         all_labels = np.array(all_labels)
         
-        # Precision, Recall, F1 for binary classification
-        true_positives = np.sum((all_predictions == 1) & (all_labels == 1))
-        false_positives = np.sum((all_predictions == 1) & (all_labels == 0))
-        false_negatives = np.sum((all_predictions == 0) & (all_labels == 1))
+        # Precision, Recall, F1 for multi-class classification (macro-averaged)
+        from sklearn.metrics import precision_recall_fscore_support
+        precision_scores, recall_scores, f1_scores, _ = precision_recall_fscore_support(
+            all_labels, all_predictions, average='macro', zero_division=0
+        )
         
-        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        # For backwards compatibility, compute simple averages
+        precision = precision_scores
+        recall = recall_scores
+        f1 = f1_scores
         
         return {
             'loss': avg_loss,
