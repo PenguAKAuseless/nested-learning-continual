@@ -4,6 +4,9 @@ Continual Learning Experiment Runner
 Usage:
     python run_experiment.py --model vit_cms --dataset cifar10 --num_tasks 5 --epochs 10
 """
+import sys
+import os
+sys.path.insert(0, os.getcwd())
 
 import torch
 import argparse
@@ -14,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from models import ViT_CMS, ViT_Simple, ViT_Replay, CNN_Replay
-from datasets import get_cifar10_task_loaders, get_dataset_info
+from my_datasets.task_as_class import get_cifar10_task_loaders, get_dataset_info
 from training import Trainer, Evaluator
 
 

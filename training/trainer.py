@@ -1,137 +1,141 @@
-"""
-Training Pipeline for Continual Learning
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
-from typing import Dict, Optional
-from tqdm import tqdm
-
+from models.cms import CMS
 
 class Trainer:
-    """
-    Trainer for continual learning experiments.
-    
-    Args:
-        model: The model to train
-        device: Device to use (cuda/cpu)
-        learning_rate: Learning rate
-        use_replay: Whether to use replay buffer (for CNN_Replay)
-        replay_batch_size: Batch size for replay samples
-    """
-    def __init__(
-        self,
-        model: nn.Module,
-        device: str = 'cuda',
-        learning_rate: float = 1e-4,
-        use_replay: bool = False,
-        replay_batch_size: int = 32
-    ):
-        self.model = model.to(device)
+    def __init__(self, model, device, learning_rate=1e-3, use_replay=False, replay_batch_size=16):
+        self.model = model
         self.device = device
-        self.learning_rate = learning_rate
         self.use_replay = use_replay
         self.replay_batch_size = replay_batch_size
-        
-        # Loss and optimizer
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
         
-    def train_task(
-        self,
-        train_loader: DataLoader,
-        task_id: int,
-        epochs: int = 10,
-        verbose: bool = True
-    ) -> Dict[str, float]:
+        # --- CẢI TIẾN 1: Tinh chỉnh Optimizer theo từng Level ---
+        self.optimizer = self._create_hierarchical_optimizer(model, learning_rate)
+
+    def _create_hierarchical_optimizer(self, model, base_lr):
         """
-        Train on a single task.
+        Tạo Optimizer với Learning Rate và Weight Decay khác nhau cho từng Level của CMS.
+        Nguyên lý:
+        - Level 0 (Fast): Học nhanh (High LR), Quên nhanh (High Decay) -> Plasticity
+        - Level N (Slow): Học chậm (Low LR), Nhớ lâu (Low Decay) -> Stability
+        """
+        params_groups = []
+        memo = set()
+
+        # 1. Tách tham số của CMS
+        for module_name, module in model.named_modules():
+            if isinstance(module, CMS):
+                for level_idx, level_module in enumerate(module.levels):
+                    # Tính toán hệ số điều chỉnh dựa trên level
+                    # Level càng cao -> k^i càng lớn -> Tần số cập nhật thấp
+                    # Scaling factor: Giảm LR theo lũy thừa của k (hoặc căn bậc 2)
+                    
+                    # Giả sử k=module.k (ví dụ k=2)
+                    # Level 0: scale = 1.0
+                    # Level 1: scale = 0.5
+                    # Level 2: scale = 0.25
+                    k_factor = module.k
+                    scale = 1.0 / (k_factor ** level_idx) # Hoặc 1.0 / sqrt(k**i)
+                    
+                    decay_scale = 1.0 
+                    # Fast weights (Level 0) cần decay mạnh để tránh bias task cũ?
+                    # Hoặc Slow weights cần decay mạnh? 
+                    # Theo bài báo: Slow weights cần ổn định => Weight Decay thấp hơn.
+                    
+                    wd_scale = scale # Decay cũng giảm theo level
+                    
+                    level_params = []
+                    for p in level_module.parameters():
+                        if p not in memo:
+                            level_params.append(p)
+                            memo.add(p)
+                    
+                    if level_params:
+                        params_groups.append({
+                            'params': level_params,
+                            'lr': base_lr * scale,
+                            'weight_decay': 1e-4 * wd_scale,
+                            'name': f"cms_level_{level_idx}"
+                        })
+
+        # 2. Các tham số còn lại (Backbone không phải CMS, Head, Norm...)
+        backbone_params = []
+        for p in model.parameters():
+            if p not in memo:
+                backbone_params.append(p)
         
-        Args:
-            train_loader: DataLoader for the task
-            task_id: Task identifier
-            epochs: Number of epochs to train
-            verbose: Print progress
+        if backbone_params:
+            params_groups.append({
+                'params': backbone_params,
+                'lr': base_lr, # Base LR cho các phần tĩnh
+                'weight_decay': 1e-4,
+                'name': "backbone_standard"
+            })
             
-        Returns:
-            Dictionary with training metrics
-        """
+        print(f"[Trainer] Optimizer initialized with {len(params_groups)} groups.")
+        for g in params_groups:
+            print(f"  - {g['name']}: lr={g['lr']:.6f}, wd={g['weight_decay']:.6f}")
+
+        return optim.AdamW(params_groups)
+
+    def train_task(self, train_loader, task_id, epochs=1, verbose=True):
         self.model.train()
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
+        history = {'loss': [], 'accuracy': []}
+        
+        print(f"Training Task {task_id} for {epochs} epochs...")
         
         for epoch in range(epochs):
-            epoch_loss = 0.0
-            epoch_correct = 0
-            epoch_samples = 0
+            total_loss = 0
+            correct = 0
+            total = 0
             
-            pbar = tqdm(train_loader, desc=f"Task {task_id} Epoch {epoch+1}/{epochs}") if verbose else train_loader
-            
-            for batch_idx, (images, labels) in enumerate(pbar):
-                images, labels = images.to(self.device), labels.to(self.device)
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data, target = data.to(self.device), target.to(self.device)
                 
-                # Forward pass
-                outputs = self.model(images)
-                loss = self.criterion(outputs, labels)
+                # Replay Logic (Nếu có)
+                if self.use_replay and hasattr(self.model, 'sample_from_buffer') and self.model.get_buffer_size() > 0:
+                    buf_data, buf_target = self.model.sample_from_buffer(self.replay_batch_size)
+                    buf_data, buf_target = buf_data.to(self.device), buf_target.to(self.device)
+                    data = torch.cat([data, buf_data])
+                    target = torch.cat([target, buf_target])
                 
-                # Add replay samples if enabled
-                if self.use_replay and hasattr(self.model, 'sample_from_buffer'):
-                    replay_images, replay_labels, _ = self.model.sample_from_buffer(self.replay_batch_size)
-                    if replay_images is not None:
-                        replay_images = replay_images.to(self.device)
-                        replay_labels = replay_labels.to(self.device)
-                        replay_outputs = self.model(replay_images)
-                        replay_loss = self.criterion(replay_outputs, replay_labels)
-                        loss = loss + replay_loss
-                
-                # Backward pass
                 self.optimizer.zero_grad()
+                
+                # --- Quan trọng: CMS forward sẽ tự update step_counter bên trong ---
+                output = self.model(data)
+                
+                loss = self.criterion(output, target)
                 loss.backward()
+                
+                # Gradient Clipping để ổn định huấn luyện mạng sâu
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                
                 self.optimizer.step()
                 
-                # Add to replay buffer if enabled
-                if self.use_replay and hasattr(self.model, 'add_to_buffer'):
-                    # Add subset of current batch to buffer
-                    if batch_idx % 5 == 0:  # Add every 5th batch
-                        self.model.add_to_buffer(images, labels, task_id)
-                
-                # Track metrics
-                _, predicted = outputs.max(1)
-                correct = predicted.eq(labels).sum().item()
-                
-                epoch_loss += loss.item()
-                epoch_correct += correct
-                epoch_samples += labels.size(0)
-                
-                if verbose and isinstance(pbar, tqdm):
-                    pbar.set_postfix({
-                        'loss': f'{loss.item():.4f}',
-                        'acc': f'{100. * correct / labels.size(0):.2f}%'
-                    })
+                total_loss += loss.item()
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                total += target.size(0)
             
-            # Epoch summary
-            epoch_acc = 100. * epoch_correct / epoch_samples
+            avg_loss = total_loss / len(train_loader)
+            accuracy = 100. * correct / total
+            history['loss'].append(avg_loss)
+            history['accuracy'].append(accuracy)
+            
             if verbose:
-                print(f"Task {task_id} Epoch {epoch+1}: Loss={epoch_loss/len(train_loader):.4f}, Acc={epoch_acc:.2f}%")
-            
-            total_loss += epoch_loss
-            total_correct += epoch_correct
-            total_samples += epoch_samples
+                print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Acc: {accuracy:.2f}%")
         
-        # Return metrics
-        avg_loss = total_loss / (epochs * len(train_loader))
-        avg_acc = 100. * total_correct / total_samples
-        
-        return {
-            'loss': avg_loss,
-            'accuracy': avg_acc
-        }
-    
-    def set_learning_rate(self, lr: float):
-        """Update learning rate."""
-        self.learning_rate = lr
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
+        # Add to replay buffer after task completion (nếu model hỗ trợ)
+        if self.use_replay and hasattr(self.model, 'add_to_buffer'):
+            print("Updating Replay Buffer...")
+            # Lấy một subset mẫu từ train_loader để lưu
+            # (Code giản lược, thực tế cần lấy ngẫu nhiên)
+            count = 0
+            for data, target in train_loader:
+                if count >= 200: break # Lưu khoảng 200 mẫu mỗi task
+                self.model.add_to_buffer(data, target, task_id)
+                count += len(data)
+
+        return {'loss': avg_loss, 'accuracy': accuracy, 'history': history}
