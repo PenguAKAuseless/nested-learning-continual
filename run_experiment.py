@@ -10,6 +10,8 @@ import argparse
 import json
 import os
 import hashlib
+import random
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 
@@ -43,8 +45,7 @@ def get_config_hash(config_dict):
 
 def get_checkpoint_dir(args):
     """Get checkpoint directory based on config hash."""
-    config_hash = get_config_hash(vars(args))
-    ckpt_dir = Path(args.checkpoint_dir) / f"{args.model}_{config_hash}"
+    ckpt_dir = Path(args.checkpoint_dir) / f"task_{args.num_tasks}_{args.model}_{args.dataset}"
     return ckpt_dir
 
 
@@ -173,6 +174,20 @@ def run_experiment(args):
     Args:
         args: Command-line arguments
     """
+    # Set random seeds for reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    
+    print(f"\n{'='*60}")
+    print(f"Random seed set to: {args.seed}")
+    print(f"{'='*60}\n")
+    
     # Set device
     device = 'cuda' if torch.cuda.is_available() and not args.cpu else 'cpu'
     print(f"\nUsing device: {device}")
@@ -285,23 +300,18 @@ def run_experiment(args):
             verbose=True
         )
         
-        # Evaluate on current task (just trained) with frozen model
-        print(f"\nEvaluating Task {task_id} after training (model frozen)...")
-        eval_metrics = evaluator.evaluate_task(
-            test_loaders[task_id],
-            task_id=task_id,
-            verbose=True
-        )
-        
-        # Store baseline accuracy (performance right after training this task)
-        results['baseline_accuracies'][task_id] = eval_metrics['accuracy']
-        
-        # Evaluate on ALL previous tasks + current task (with frozen model)
-        print(f"\nEvaluating current task ({task_id}) and all previous tasks (0-{task_id-1}) to measure forgetting...")
+        # Evaluate on all tasks trained so far (0 to current task)
+        if task_id == 0:
+            print(f"\nEvaluating all tasks (Task 0)...")
+        else:
+            print(f"\nEvaluating all tasks (0 to {task_id}) to measure forgetting...")
         all_task_metrics = evaluator.evaluate_all_tasks(
             test_loaders[:task_id+1],  # All tasks from 0 to task_id
             verbose=True
         )
+        
+        # Store baseline accuracy (performance right after training this task)
+        results['baseline_accuracies'][task_id] = all_task_metrics[task_id]['accuracy']
         
         # Track per-task performance over time (for forgetting analysis)
         for tid in range(task_id + 1):
@@ -316,14 +326,14 @@ def run_experiment(args):
         # Store results
         results['task_results'][task_id] = {
             'train_metrics': train_metrics,
-            'eval_metrics': eval_metrics,
+            'eval_metrics': all_task_metrics[task_id],
             'all_tasks_eval': all_task_metrics
         }
         
         print(f"\nTask {task_id} Summary:")
         print(f"  Train Acc: {train_metrics['accuracy']:.2f}%")
-        print(f"  Test Acc (current task): {eval_metrics['accuracy']:.2f}%")
-        print(f"  Test F1 (current task): {eval_metrics['f1']:.2f}%")
+        print(f"  Test Acc: {all_task_metrics[task_id]['accuracy']:.2f}%")
+        print(f"  Test F1 (current task): {all_task_metrics[task_id]['f1']:.2f}%")
         print(f"  Avg Acc (all tasks 0-{task_id}): {all_task_metrics['average']['avg_accuracy']:.2f}%")
         if task_id > 0:
             print(f"  Previous tasks performance:")
@@ -371,7 +381,7 @@ def save_results(results, args):
     """Save experiment results to disk."""
     # Create results directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = f"{args.model}_{args.dataset}_tasks{args.num_tasks}_{timestamp}"
+    exp_name = f"task_{args.num_tasks}_{args.model}_{args.dataset}_{timestamp}"
     results_dir = Path(args.output_dir) / exp_name
     results_dir.mkdir(parents=True, exist_ok=True)
     
@@ -438,6 +448,8 @@ def main():
                        help='Use CPU instead of GPU')
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='Output directory for results')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='Random seed for reproducibility')
     
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',

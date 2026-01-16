@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
-def run_experiment(model, num_tasks=2, epochs=3, batch_size=16):
+def run_experiment(model, num_tasks=2, epochs=3, batch_size=16, seed=42):
     """Run a single experiment"""
     print(f"\n{'='*60}")
     print(f"Running experiment: {model}")
@@ -29,7 +29,8 @@ def run_experiment(model, num_tasks=2, epochs=3, batch_size=16):
         "--num_tasks", str(num_tasks),
         "--epochs", str(epochs),
         "--batch_size", str(batch_size),
-        "--learning_rate", "1e-4"
+        "--learning_rate", "1e-4",
+        "--seed", str(seed)
     ]
     
     # Add model-specific args
@@ -88,6 +89,11 @@ def generate_comparison_analysis(results_dirs: Dict[str, Path], num_tasks: int) 
                 })
     
     df_table = pd.DataFrame(table_data)
+    
+    if df_table.empty:
+        print("\nNo task performance data found to compare!")
+        return comparison_dir
+    
     table_file = comparison_dir / 'comparison_table.csv'
     df_table.to_csv(table_file, index=False)
     
@@ -103,9 +109,10 @@ def generate_comparison_analysis(results_dirs: Dict[str, Path], num_tasks: int) 
     print("="*80)
     for model_name in all_results.keys():
         model_data = df_table[df_table['Model'] == model_name]
-        avg_acc = model_data['Accuracy (%)'].astype(float).mean()
-        avg_f1 = model_data['F1 Score (%)'].astype(float).mean()
-        print(f"{model_name:20s}: Acc={avg_acc:.2f}%, F1={avg_f1:.2f}%")
+        if not model_data.empty:
+            avg_acc = model_data['Accuracy (%)'].astype(float).mean()
+            avg_f1 = model_data['F1 Score (%)'].astype(float).mean()
+            print(f"{model_name:20s}: Acc={avg_acc:.2f}%, F1={avg_f1:.2f}%")
     
     # 2. Create forgetting analysis figure
     print("\nCreating forgetting analysis figure...")
@@ -168,14 +175,16 @@ def main():
     # Configuration
     models = ["vit_cms", "vit_simple", "vit_replay", "cnn_replay"]
     num_tasks = 5  # Start with 5 tasks for testing
-    epochs = 5     # 5 epochs for testing
+    epochs = 2     # 2 epochs for testing
     batch_size = 16  # Smaller batch for GPU memory safety
+    seed = 42      # Fixed seed for reproducibility
     
     print(f"\nConfiguration:")
     print(f"  Models: {', '.join(models)}")
     print(f"  Tasks: {num_tasks}")
     print(f"  Epochs per task: {epochs}")
     print(f"  Batch size: {batch_size}")
+    print(f"  Random seed: {seed}")
     print(f"\nEstimated time: ~{len(models) * num_tasks * epochs} minutes")
     print("\nPress Ctrl+C to cancel...")
     
@@ -189,7 +198,7 @@ def main():
     results = {}
     results_dirs = {}
     for model in models:
-        success = run_experiment(model, num_tasks, epochs, batch_size)
+        success = run_experiment(model, num_tasks, epochs, batch_size, seed)
         results[model] = success
         # Find the most recent results directory for this model
         if success:
