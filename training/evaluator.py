@@ -1,11 +1,12 @@
 """
 Evaluation Pipeline for Continual Learning
+Updated with Logit Masking for Task-Incremental Learning
 """
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from typing import List, Dict
+from typing import List, Dict, Optional
 from tqdm import tqdm
 import numpy as np
 
@@ -13,10 +14,6 @@ import numpy as np
 class Evaluator:
     """
     Evaluator for continual learning experiments.
-    
-    Args:
-        model: The model to evaluate
-        device: Device to use (cuda/cpu)
     """
     def __init__(self, model: nn.Module, device: str = 'cuda'):
         self.model = model.to(device)
@@ -31,15 +28,7 @@ class Evaluator:
         verbose: bool = True
     ) -> Dict[str, float]:
         """
-        Evaluate on a single task.
-        
-        Args:
-            test_loader: DataLoader for the task
-            task_id: Task identifier
-            verbose: Print progress
-            
-        Returns:
-            Dictionary with evaluation metrics
+        Evaluate on a single task with Logit Masking.
         """
         self.model.eval()
         
@@ -50,6 +39,10 @@ class Evaluator:
         all_predictions = []
         all_labels = []
         
+        # [QUAN TRỌNG] Lấy danh sách class của task này
+        # (Ví dụ: Task 0 -> [0, 1])
+        active_classes = getattr(test_loader.dataset, 'task_classes', None)
+        
         pbar = tqdm(test_loader, desc=f"Evaluating Task {task_id}") if verbose else test_loader
         
         for images, labels in pbar:
@@ -57,6 +50,16 @@ class Evaluator:
             
             # Forward pass
             outputs = self.model(images)
+            
+            # --- [ĐOẠN CODE MỚI] LOGIT MASKING ---
+            # Mục tiêu: Gán -infinity cho các class không thuộc task này
+            # để hàm max() không bao giờ chọn nhầm.
+            if active_classes is not None:
+                mask = torch.full_like(outputs, float('-inf'))
+                mask[:, active_classes] = 0
+                outputs = outputs + mask
+            # -------------------------------------
+            
             loss = self.criterion(outputs, labels)
             
             # Predictions
@@ -78,30 +81,25 @@ class Evaluator:
                 })
         
         # Calculate metrics
-        avg_loss = total_loss / len(test_loader)
-        accuracy = 100. * total_correct / total_samples
+        avg_loss = total_loss / len(test_loader) if len(test_loader) > 0 else 0
+        accuracy = 100. * total_correct / total_samples if total_samples > 0 else 0
         
         # Calculate per-class metrics
         all_predictions = np.array(all_predictions)
         all_labels = np.array(all_labels)
         
-        # Precision, Recall, F1 for multi-class classification (macro-averaged)
+        # Precision, Recall, F1
         from sklearn.metrics import precision_recall_fscore_support
         precision_scores, recall_scores, f1_scores, _ = precision_recall_fscore_support(
             all_labels, all_predictions, average='macro', zero_division=0
         )
         
-        # For backwards compatibility, compute simple averages
-        precision = precision_scores
-        recall = recall_scores
-        f1 = f1_scores
-        
         return {
             'loss': avg_loss,
             'accuracy': accuracy,
-            'precision': precision * 100,
-            'recall': recall * 100,
-            'f1': f1 * 100
+            'precision': precision_scores * 100,
+            'recall': recall_scores * 100,
+            'f1': f1_scores * 100
         }
     
     @torch.no_grad()
@@ -110,16 +108,7 @@ class Evaluator:
         test_loaders: List[DataLoader],
         verbose: bool = True
     ) -> Dict[int, Dict[str, float]]:
-        """
-        Evaluate on all tasks.
-        
-        Args:
-            test_loaders: List of test dataloaders
-            verbose: Print progress
-            
-        Returns:
-            Dictionary mapping task_id to metrics
-        """
+        """Evaluate on all tasks."""
         results = {}
         
         for task_id, test_loader in enumerate(test_loaders):
@@ -127,19 +116,20 @@ class Evaluator:
             results[task_id] = metrics
             
             if verbose:
-                print(f"Task {task_id}: Acc={metrics['accuracy']:.2f}%, "
-                      f"F1={metrics['f1']:.2f}%")
+                print(f"Task {task_id}: Acc={metrics['accuracy']:.2f}%, F1={metrics['f1']:.2f}%")
         
         # Calculate average metrics
-        avg_metrics = {
-            'avg_accuracy': np.mean([m['accuracy'] for m in results.values()]),
-            'avg_f1': np.mean([m['f1'] for m in results.values()]),
-            'avg_loss': np.mean([m['loss'] for m in results.values()])
-        }
+        if results:
+            avg_metrics = {
+                'avg_accuracy': np.mean([m['accuracy'] for m in results.values()]),
+                'avg_f1': np.mean([m['f1'] for m in results.values()]),
+                'avg_loss': np.mean([m['loss'] for m in results.values()])
+            }
+        else:
+            avg_metrics = {'avg_accuracy': 0, 'avg_f1': 0, 'avg_loss': 0}
         
         if verbose:
-            print(f"\nAverage: Acc={avg_metrics['avg_accuracy']:.2f}%, "
-                  f"F1={avg_metrics['avg_f1']:.2f}%")
+            print(f"\nAverage: Acc={avg_metrics['avg_accuracy']:.2f}%, F1={avg_metrics['avg_f1']:.2f}%")
         
         results['average'] = avg_metrics
         
@@ -151,22 +141,15 @@ class Evaluator:
         test_loaders: List[DataLoader],
         baseline_accuracies: Dict[int, float]
     ) -> Dict[str, float]:
-        """
-        Calculate forgetting metrics.
-        
-        Args:
-            test_loaders: List of test dataloaders
-            baseline_accuracies: Accuracy after training each task (before training next)
-            
-        Returns:
-            Dictionary with forgetting metrics
-        """
+        """Calculate forgetting metrics."""
+        # Tắt verbose để không in lại quá nhiều
         current_results = self.evaluate_all_tasks(test_loaders, verbose=False)
         
         forgetting = {}
         for task_id in baseline_accuracies:
             if task_id in current_results:
-                forgetting[task_id] = baseline_accuracies[task_id] - current_results[task_id]['accuracy']
+                # Forgetting = Max_Acc_Ever - Current_Acc
+                forgetting[task_id] = max(0, baseline_accuracies[task_id] - current_results[task_id]['accuracy'])
         
         avg_forgetting = np.mean(list(forgetting.values())) if forgetting else 0.0
         
