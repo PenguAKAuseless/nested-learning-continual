@@ -1,3 +1,5 @@
+from turtle import update
+
 import torch
 from torch.optim import Optimizer
 
@@ -27,9 +29,9 @@ class CMSOptimizerWrapper:
         """
         level_map = {}
         for name, param in self.model.named_parameters():
-            level = 0  # Default to highest frequency (fastest update)
+            level = 0
             
-            # Parsing level from name (e.g., "layers.0.cms_block.level_2.weight")
+            # Parsing level from name
             parts = name.split('.')
             for part in parts:
                 if part.startswith('level_'):
@@ -46,6 +48,7 @@ class CMSOptimizerWrapper:
         Performs a single optimization step with frequency masking.
         """
         self.global_step += 1
+        hidden_grads = {}
         
         # 1. Mask gradients before the optimizer step
         for group in self.optimizer.param_groups:
@@ -56,15 +59,34 @@ class CMSOptimizerWrapper:
                 level = self.param_levels.get(p, 0)
                 update_freq = self.k_factor ** level
                 
-                # Equation 71 in the paper: Update only if step % freq == 0
                 if self.global_step % update_freq != 0:
-                    p.grad = None  # Effectively skips update for this parameter
+                    hidden_grads[p] = p.grad
+                    p.grad = None
+                else:
+                    if update_freq > 1:
+                        p.grad.data.div_(update_freq)
 
         # 2. Standard optimizer step
         self.optimizer.step()
+        
+        # 3. restore gradient for slow class
+        for p, grad in hidden_grads.items():
+            p.grad = grad
+        
 
     def zero_grad(self, set_to_none: bool = False):
-        self.optimizer.zero_grad(set_to_none=set_to_none)
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                if p.grad is not None:
+                    level = self.param_levels.get(p, 0)
+                    update_freq = self.k_factor ** level
+                    
+                    if self.global_step == 0 or self.global_step % update_freq == 0:
+                        if set_to_none:
+                            p.grad = None
+                        else:
+                            p.grad.detach_()
+                            p.grad.zero_()
 
     def state_dict(self):
         return self.optimizer.state_dict()
